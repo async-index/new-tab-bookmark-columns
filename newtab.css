@@ -1,0 +1,738 @@
+:root {
+  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-xs:     10px;   /* micro labels */
+  --font-sm:     11px;   /* small UI chrome */
+  --font-ui:     12px;   /* controls, inputs */
+  --font-base:   13px;   /* body text */
+  --font-md:     14px;   /* headings, icons */
+  --font-lg:     16px;   /* large icons */
+  --font-xl:     22px;   /* close button */
+
+  --leading:       1.4;  /* body text */
+  --leading-tight: 1;    /* icon buttons, single-line UI */
+  --leading-label: 13px; /* small labels */
+  --leading-base:  16px; /* bookmark links */
+
+  --weight-medium:   500;
+  --weight-semibold: 600;
+  --weight-bold:     700;
+
+  --tracking-normal: 0;
+  --tracking-base:  -0.08px;
+  --tracking-label:  0.12px;
+  --tracking-wide:   0.1em;  /* uppercase labels */
+
+  --bg:              #ffffff;
+  --text:            #1a1a1a;
+  --text-muted:      #888888;
+  --border:          #e8e8e8;
+  --hover:           #f4f4f4;
+  --folder-label:    #aaaaaa;
+  --handle:          #e0e0e0;
+  --handle-active:   #bbbbbb;
+  --settings-bg:     #f9f9f9;
+  --settings-border: #e8e8e8;
+  --accent:          #4a90d9;
+  --accent-text:     #ffffff;
+  --chip-remove:     rgba(255,255,255,0.7);
+}
+
+[data-theme="dark"] {
+  --bg:              #141414;
+  --text:            #e0e0e0;
+  --text-muted:      #666666;
+  --border:          #2c2c2c;
+  --hover:           #1e1e1e;
+  --folder-label:    #555555;
+  --handle:          #2a2a2a;
+  --handle-active:   #444444;
+  --settings-bg:     #1a1a1a;
+  --settings-border: #2c2c2c;
+  --accent:          #5ba3eb;
+  --chip-remove:     rgba(255,255,255,0.6);
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-family);
+  font-size: var(--font-base);
+  line-height: var(--leading);
+  overflow: hidden;
+}
+
+/* ── Layout ────────────────────────────────────────────────────────────────── */
+
+#columns-container {
+  display: flex;
+  height: 100vh;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-left: 10px;
+}
+
+.column {
+  flex-shrink: 0;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 28px 18px;
+}
+
+.column-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── Resize handle ──────────────────────────────────────────────────────────── */
+
+.resize-handle {
+  flex: 0 0 5px;
+  height: 100%;
+  background: var(--handle);
+  cursor: col-resize;
+  transition: background 0.15s;
+  position: relative;
+}
+
+.resize-handle::after {
+  content: '';
+  position: absolute;
+  inset: 0 -4px;  /* extend hit area */
+}
+
+.resize-handle:hover,
+.resize-handle.dragging {
+  background: var(--handle-active);
+}
+
+.hide-handles .resize-handle {
+  background: transparent;
+}
+
+.hide-handles .resize-handle:hover,
+.hide-handles .resize-handle.dragging {
+  background: var(--handle);
+}
+
+/* ── Folder groups ──────────────────────────────────────────────────────────── */
+
+.folder-group {
+  margin-bottom: 22px;
+}
+
+
+.folder-label {
+  font-size: var(--font-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-label);
+  letter-spacing: var(--tracking-label);
+  color: var(--folder-label);
+  margin-bottom: 5px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Subfolders ─────────────────────────────────────────────────────────────── */
+
+.subfolder-group {
+  margin-bottom: 0;
+  position: relative;
+}
+
+.subfolder-group[draggable="true"] {
+  cursor: default;
+}
+
+.subfolder-group.dragging {
+  opacity: 0.35;
+}
+
+.subfolder-group.drop-before::before,
+.subfolder-group.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+  pointer-events: none;
+}
+
+.subfolder-group.drop-before::before { top: -1px; }
+.subfolder-group.drop-after::after  { bottom: -1px; }
+
+.subfolder-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: calc(100% + 10px);
+  padding: 6px 5px;
+  margin: 0 -5px;
+  border: none;
+  background: none;
+  border-radius: 4px;
+  color: var(--text);
+  font-family: var(--font-family);
+  font-size: var(--font-base);
+  font-weight: 400;
+  line-height: var(--leading-base);
+  letter-spacing: var(--tracking-base);
+  cursor: pointer;
+  text-align: left;
+}
+
+.subfolder-header:hover {
+  background: var(--hover);
+}
+
+.subfolder-icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 13px;
+  color: var(--folder-label);
+}
+
+.subfolder-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.subfolder-arrow {
+  font-family: var(--font-family);
+  font-size: 11px;
+  flex-shrink: 0;
+  transition: transform 0.15s;
+  color: var(--folder-label);
+  line-height: 1;
+  margin-left: auto;
+}
+
+.subfolder-arrow::before {
+  content: '›';
+}
+
+.subfolder-arrow.open {
+  transform: rotate(90deg);
+}
+
+.subfolder-content {
+  padding-left: 21px;
+}
+
+/* ── Bookmark items ─────────────────────────────────────────────────────────── */
+
+.bookmark-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 5px;
+  margin: 0 -5px;
+  border-radius: 4px;
+  text-decoration: none;
+  color: var(--text);
+  overflow: hidden;
+}
+
+.bookmark-item:hover {
+  background: var(--hover);
+}
+
+.dividers .bookmark-item:not(:last-child),
+.dividers .subfolder-group:not(:last-child) {
+  border-bottom: 1px solid var(--border);
+}
+
+.bookmark-favicon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border-radius: 2px;
+  object-fit: contain;
+}
+
+.bookmark-favicon.hidden {
+  visibility: hidden;
+}
+
+.bookmark-title {
+  font-size: var(--font-base);
+  font-weight: 400;
+  line-height: var(--leading-base);
+  letter-spacing: var(--tracking-base);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Settings toggle ────────────────────────────────────────────────────────── */
+
+#settings-toggle {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s, background 0.15s;
+  z-index: 100;
+}
+
+body:hover #settings-toggle,
+#settings-toggle:focus {
+  opacity: 1;
+}
+
+#settings-toggle:hover {
+  background: var(--hover);
+}
+
+
+/* ── Settings panel ─────────────────────────────────────────────────────────── */
+
+#settings-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 300px;
+  height: 100vh;
+  background: var(--settings-bg);
+  border-left: 1px solid var(--settings-border);
+  padding: 20px;
+  overflow-y: auto;
+  z-index: 200;
+  transform: translateX(0);
+  transition: transform 0.22s ease;
+}
+
+#settings-panel.hidden {
+  transform: translateX(100%);
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 26px;
+}
+
+.settings-header h2 {
+  font-size: var(--font-md);
+  font-weight: var(--weight-semibold);
+}
+
+#settings-close {
+  background: var(--hover);
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#settings-close:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.settings-section {
+  margin-bottom: 28px;
+}
+
+.settings-section h3 {
+  font-size: var(--font-xs);
+  font-weight: var(--weight-bold);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+}
+
+/* ── Theme picker ────────────────────────────────────────────────────────────── */
+
+.theme-picker {
+  display: flex;
+  background: var(--border);
+  border-radius: 7px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.theme-btn {
+  flex: 1;
+  padding: 5px 8px;
+  border: none;
+  background: none;
+  border-radius: 5px;
+  font-family: var(--font-family);
+  font-size: var(--font-ui);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.theme-btn.active {
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+/* ── Theme toggle ────────────────────────────────────────────────────────────── */
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.toggle {
+  position: relative;
+  width: 34px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--border);
+  border-radius: 18px;
+  transition: background 0.18s;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  top: 3px;
+  left: 3px;
+  transition: transform 0.18s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+.toggle input:checked + .toggle-slider {
+  background: var(--accent);
+}
+
+.toggle input:checked + .toggle-slider::before {
+  transform: translateX(16px);
+}
+
+/* ── Column config cards ─────────────────────────────────────────────────────── */
+
+.col-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+
+.col-card[draggable="true"] {
+  cursor: grab;
+  transition: opacity 0.15s, box-shadow 0.15s;
+}
+
+.col-card.dragging {
+  opacity: 0.4;
+}
+
+.col-card.drag-over {
+  box-shadow: 0 -2px 0 0 var(--accent), 0 0 0 1px var(--accent);
+}
+
+.col-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.col-card-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.drag-grip {
+  color: var(--text-muted);
+  font-size: var(--font-md);
+  cursor: grab;
+  user-select: none;
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+
+.col-card:hover .drag-grip {
+  opacity: 1;
+}
+
+.col-card-title {
+  font-size: var(--font-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-muted);
+}
+
+.btn-icon {
+  background: none;
+  border: none;
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--font-lg);
+  line-height: var(--leading-tight);
+}
+
+.btn-icon:hover {
+  background: var(--hover);
+  color: #d44;
+}
+
+.folder-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 8px;
+  min-height: 20px;
+}
+
+.folder-chips:empty::before {
+  content: 'No folders selected';
+  color: var(--text-muted);
+  font-size: var(--font-sm);
+  font-style: italic;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--accent);
+  color: var(--accent-text);
+  border-radius: 4px;
+  padding: 2px 7px 2px 8px;
+  font-size: var(--font-sm);
+  max-width: 200px;
+}
+
+.chip-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chip-remove {
+  background: none;
+  border: none;
+  color: var(--chip-remove);
+  cursor: pointer;
+  font-size: var(--font-md);
+  padding: 0;
+  line-height: var(--leading-tight);
+  flex-shrink: 0;
+}
+
+.chip-remove:hover {
+  color: var(--accent-text);
+}
+
+.chip[draggable="true"] {
+  cursor: grab;
+}
+
+.chip.dragging {
+  opacity: 0.35;
+}
+
+.chip.drag-over {
+  outline: 2px solid rgba(255, 255, 255, 0.6);
+  outline-offset: -2px;
+}
+
+.folder-select {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--font-ui);
+  cursor: pointer;
+  appearance: none;
+}
+
+.folder-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.btn-add-col {
+  width: 100%;
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--font-ui);
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.btn-add-col:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ── Bookmark drag & edit ───────────────────────────────────────────────────── */
+
+.item-hidden {
+  opacity: 0.3;
+}
+
+.bookmark-item[draggable="true"] {
+  cursor: default;
+}
+
+.bookmark-item.dragging {
+  opacity: 0.35;
+}
+
+.bookmark-item.drop-before::before,
+.bookmark-item.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+  pointer-events: none;
+}
+
+.bookmark-item.drop-before::before { top: -1px; }
+.bookmark-item.drop-after::after  { bottom: -1px; }
+
+.bookmark-rename-input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-family);
+  font-size: var(--font-base);
+  font-weight: 400;
+  line-height: var(--leading-base);
+  letter-spacing: var(--tracking-base);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 0 4px;
+  outline: none;
+}
+
+/* ── Context menu ────────────────────────────────────────────────────────────── */
+
+.ctx-menu {
+  position: fixed;
+  z-index: 500;
+  min-width: 160px;
+  background: var(--settings-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
+}
+
+.ctx-menu.hidden {
+  display: none;
+}
+
+.ctx-item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: none;
+  text-align: left;
+  font-family: var(--font-family);
+  font-size: var(--font-base);
+  color: var(--text);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.ctx-item:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.ctx-item:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.ctx-item.danger {
+  color: #d44;
+}
+
+.ctx-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
+/* ── Scrollbars ──────────────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--handle-active);
+}

@@ -32,9 +32,9 @@
   --handle-active:   #bbbbbb;
   --settings-bg:     #f9f9f9;
   --settings-border: #e8e8e8;
-  --accent:          #4a90d9;
-  --accent-text:     #ffffff;
-  --chip-remove:     rgba(255,255,255,0.7);
+  --accent:          #c1c1c1;
+  --accent-text:     #1a1a1a;
+  --chip-remove:     rgba(0, 0, 0, 0.24);
 }
 
 [data-theme="dark"] {
@@ -48,8 +48,8 @@
   --handle-active:   #444444;
   --settings-bg:     #1a1a1a;
   --settings-border: #2c2c2c;
-  --accent:          #5ba3eb;
-  --chip-remove:     rgba(255,255,255,0.6);
+  --accent:          #979797;
+  --chip-remove:     rgba(0, 0, 0, 0.24);
 }
 
 *, *::before, *::after {
@@ -339,8 +339,8 @@ body:hover #settings-toggle,
 }
 
 .settings-header h2 {
-  font-size: var(--font-md);
-  font-weight: var(--weight-semibold);
+  font-size: var(--font-lg);
+  font-weight: var(--weight-medium);
 }
 
 #settings-close {
@@ -365,10 +365,10 @@ body:hover #settings-toggle,
 }
 
 .settings-section h3 {
-  font-size: var(--font-xs);
+  font-size: var(--font-sm);
   font-weight: var(--weight-bold);
-  letter-spacing: var(--tracking-wide);
-  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  text-transform: none;
   color: var(--text-muted);
   margin-bottom: 14px;
 }

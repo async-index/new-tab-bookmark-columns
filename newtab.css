@@ -4,8 +4,8 @@
   --font-sm:     11px;   /* small UI chrome */
   --font-ui:     12px;   /* controls, inputs */
   --font-base:   13px;   /* body text */
-  --font-md:     14px;   /* headings, icons */
-  --font-lg:     16px;   /* large icons */
+  --font-md:     15px;   /* headings, icons */
+  --font-lg:     17px;   /* large icons */
   --font-xl:     22px;   /* close button */
 
   --leading:       1.4;  /* body text */
@@ -34,7 +34,6 @@
   --settings-border: #e8e8e8;
   --accent:          #c1c1c1;
   --accent-text:     #1a1a1a;
-  --chip-remove:     rgba(0, 0, 0, 0.24);
 }
 
 [data-theme="dark"] {
@@ -49,7 +48,6 @@
   --settings-bg:     #1a1a1a;
   --settings-border: #2c2c2c;
   --accent:          #979797;
-  --chip-remove:     rgba(0, 0, 0, 0.24);
 }
 
 *, *::before, *::after {
@@ -75,7 +73,6 @@ html, body {
   height: 100vh;
   overflow-x: auto;
   overflow-y: hidden;
-  padding-left: 10px;
 }
 
 .column {
@@ -83,7 +80,35 @@ html, body {
   height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 28px 18px;
+  padding: 18px;
+  position: relative;
+  transition: transform 180ms cubic-bezier(0.2, 0, 0, 1);
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.column:hover,
+.column:focus-within {
+  scrollbar-color: var(--handle-active) transparent;
+}
+
+.column::-webkit-scrollbar {
+  width: 6px;
+}
+
+.column::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.column::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+  transition: background 0.15s;
+}
+
+.column:hover::-webkit-scrollbar-thumb,
+.column:focus-within::-webkit-scrollbar-thumb {
+  background: var(--handle-active);
 }
 
 .column-spacer {
@@ -98,7 +123,7 @@ html, body {
   height: 100%;
   background: var(--handle);
   cursor: col-resize;
-  transition: background 0.15s;
+  transition: background 0.15s, transform 180ms cubic-bezier(0.2, 0, 0, 1);
   position: relative;
 }
 
@@ -125,9 +150,26 @@ html, body {
 /* ── Folder groups ──────────────────────────────────────────────────────────── */
 
 .folder-group {
-  margin-bottom: 22px;
+  /* padding (vs margin) so the bottom 22px is part of the folder-group's
+     hit area — lets you drop a bookmark at the end of the list by hovering
+     just below the last item. */
+  padding-bottom: 22px;
+  position: relative;
+  transition: transform 180ms cubic-bezier(0.2, 0, 0, 1);
 }
 
+.folder-group.dragging {
+  opacity: 0.35;
+}
+
+/* Indicator appended during drag for folders that overflow the show-cap. */
+.drag-more-indicator {
+  padding: 6px 5px;
+  margin: 0 -5px;
+  font-size: var(--font-sm);
+  color: var(--text-muted);
+  font-style: italic;
+}
 
 .folder-label {
   font-size: var(--font-xs);
@@ -141,6 +183,12 @@ html, body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: default;
+}
+
+.hide-folder-dividers .folder-label {
+  border-bottom: none;
+  padding-bottom: 0;
 }
 
 /* ── Subfolders ─────────────────────────────────────────────────────────────── */
@@ -158,8 +206,11 @@ html, body {
   opacity: 0.35;
 }
 
+/* Horizontal drop-position indicator (shared with .bookmark-item below). */
 .subfolder-group.drop-before::before,
-.subfolder-group.drop-after::after {
+.subfolder-group.drop-after::after,
+.bookmark-item.drop-before::before,
+.bookmark-item.drop-after::after {
   content: '';
   position: absolute;
   left: 0;
@@ -170,8 +221,11 @@ html, body {
   pointer-events: none;
 }
 
-.subfolder-group.drop-before::before { top: -1px; }
-.subfolder-group.drop-after::after  { bottom: -1px; }
+.subfolder-group.drop-before::before,
+.bookmark-item.drop-before::before { top: -1px; }
+
+.subfolder-group.drop-after::after,
+.bookmark-item.drop-after::after { bottom: -1px; }
 
 .subfolder-header {
   display: flex;
@@ -231,6 +285,119 @@ html, body {
 
 .subfolder-content {
   padding-left: 21px;
+  /* Same idea as `.folder-group` padding-bottom: gives a hit area below the
+     last item so the last position is droppable. */
+  padding-bottom: 8px;
+}
+
+/* ── Search widget ──────────────────────────────────────────────────────────── */
+
+/* No divider line under the "Search" label — the input below has its own border. */
+.folder-group[data-fid="__widget:search__"] > .folder-label {
+  border-bottom: none;
+  padding-bottom: 0;
+  margin-bottom: 8px;
+}
+
+.search-input-wrap {
+  position: relative;
+  margin-bottom: 4px;
+}
+
+.search-input {
+  width: 100%;
+  padding: 6px 28px 6px 8px; /* room for the clear button on the right */
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-family);
+  font-size: var(--font-base);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.search-input:focus {
+  border-color: var(--accent);
+}
+
+/* Hide the native search cancel button — we render our own to match `.btn-icon`. */
+.search-input::-webkit-search-cancel-button,
+.search-input::-webkit-search-decoration {
+  -webkit-appearance: none;
+  display: none;
+}
+
+.search-clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--font-lg);
+  line-height: var(--leading-tight);
+}
+
+/* Show only when the input has a value. */
+.search-input:not(:placeholder-shown) ~ .search-clear {
+  display: flex;
+}
+
+.search-clear:hover {
+  background: var(--hover);
+  color: #d44;
+}
+
+.search-empty {
+  padding: 6px 5px;
+  font-size: var(--font-sm);
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ── Status widget ──────────────────────────────────────────────────────────── */
+
+.status-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 5px;
+  margin: 0 -5px;
+  font-size: var(--font-base);
+  color: var(--text);
+  line-height: var(--leading-base);
+}
+
+.status-row-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-row-value {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.status-subheader {
+  font-size: var(--font-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+  color: var(--folder-label);
+  margin-top: 14px;
+  margin-bottom: 5px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--border);
 }
 
 /* ── Bookmark items ─────────────────────────────────────────────────────────── */
@@ -245,14 +412,34 @@ html, body {
   border-radius: 4px;
   text-decoration: none;
   color: var(--text);
-  overflow: hidden;
 }
 
 .bookmark-item:hover {
   background: var(--hover);
 }
 
-.dividers .bookmark-item:not(:last-child),
+/* Straight divider line that doesn't follow the bookmark's rounded corners.
+   Positioned just below the item via ::after; subfolder-group has no
+   border-radius so the simple border still looks clean there. */
+.dividers .bookmark-item:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  bottom: -1px;
+  height: 1px;
+  background: var(--border);
+  pointer-events: none;
+}
+
+/* Hide the dividers immediately above and below the hovered bookmark so the
+   rounded hover background is framed cleanly. Uses :has() for the previous-
+   sibling effect. */
+.dividers .bookmark-item:hover::after,
+.dividers .bookmark-item:has(+ .bookmark-item:hover)::after {
+  background: transparent;
+}
+
 .dividers .subfolder-group:not(:last-child) {
   border-bottom: 1px solid var(--border);
 }
@@ -295,14 +482,8 @@ html, body {
   border-radius: 6px;
   color: var(--text-muted);
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.2s, background 0.15s;
+  transition: background 0.15s;
   z-index: 100;
-}
-
-body:hover #settings-toggle,
-#settings-toggle:focus {
-  opacity: 1;
 }
 
 #settings-toggle:hover {
@@ -325,6 +506,15 @@ body:hover #settings-toggle,
   z-index: 200;
   transform: translateX(0);
   transition: transform 0.22s ease;
+  display: flex;
+  flex-direction: column;
+}
+
+#settings-footer {
+  margin-top: auto;
+  padding-top: 20px;
+  font-size: var(--font-sm);
+  color: var(--text-muted);
 }
 
 #settings-panel.hidden {
@@ -455,171 +645,22 @@ body:hover #settings-toggle,
   transform: translateX(16px);
 }
 
-/* ── Column config cards ─────────────────────────────────────────────────────── */
-
-.col-card {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 12px;
-  margin-bottom: 8px;
-}
-
-.col-card[draggable="true"] {
-  cursor: grab;
-  transition: opacity 0.15s, box-shadow 0.15s;
-}
-
-.col-card.dragging {
-  opacity: 0.4;
-}
-
-.col-card.drag-over {
-  box-shadow: 0 -2px 0 0 var(--accent), 0 0 0 1px var(--accent);
-}
-
-.col-card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
-}
-
-.col-card-left {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.drag-grip {
-  color: var(--text-muted);
-  font-size: var(--font-md);
-  cursor: grab;
-  user-select: none;
-  flex-shrink: 0;
-  opacity: 0.5;
-}
-
-.col-card:hover .drag-grip {
-  opacity: 1;
-}
-
-.col-card-title {
-  font-size: var(--font-sm);
-  font-weight: var(--weight-semibold);
-  color: var(--text-muted);
-}
-
-.btn-icon {
-  background: none;
-  border: none;
-  padding: 2px 5px;
-  border-radius: 4px;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: var(--font-lg);
-  line-height: var(--leading-tight);
-}
-
-.btn-icon:hover {
-  background: var(--hover);
-  color: #d44;
-}
-
-.folder-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  margin-bottom: 8px;
-  min-height: 20px;
-}
-
-.folder-chips:empty::before {
-  content: 'No folders selected';
-  color: var(--text-muted);
-  font-size: var(--font-sm);
-  font-style: italic;
-}
-
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  background: var(--accent);
-  color: var(--accent-text);
-  border-radius: 4px;
-  padding: 2px 7px 2px 8px;
-  font-size: var(--font-sm);
-  max-width: 200px;
-}
-
-.chip-name {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.chip-remove {
-  background: none;
-  border: none;
-  color: var(--chip-remove);
-  cursor: pointer;
-  font-size: var(--font-md);
-  padding: 0;
-  line-height: var(--leading-tight);
-  flex-shrink: 0;
-}
-
-.chip-remove:hover {
-  color: var(--accent-text);
-}
-
-.chip[draggable="true"] {
-  cursor: grab;
-}
-
-.chip.dragging {
-  opacity: 0.35;
-}
-
-.chip.drag-over {
-  outline: 2px solid rgba(255, 255, 255, 0.6);
-  outline-offset: -2px;
-}
-
-.folder-select {
+.btn-secondary {
   width: 100%;
-  padding: 4px 6px;
+  padding: 6px 10px;
   border: 1px solid var(--border);
   border-radius: 5px;
   background: var(--bg);
   color: var(--text);
+  font-family: var(--font-family);
   font-size: var(--font-ui);
   cursor: pointer;
-  appearance: none;
+  transition: background 0.15s, border-color 0.15s;
 }
 
-.folder-select:focus {
-  outline: none;
+.btn-secondary:hover {
+  background: var(--hover);
   border-color: var(--accent);
-}
-
-.btn-add-col {
-  width: 100%;
-  padding: 8px;
-  border: 1px dashed var(--border);
-  border-radius: 8px;
-  background: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: var(--font-ui);
-  transition: border-color 0.15s, color 0.15s;
-}
-
-.btn-add-col:hover {
-  border-color: var(--accent);
-  color: var(--accent);
 }
 
 /* ── Bookmark drag & edit ───────────────────────────────────────────────────── */
@@ -635,21 +676,6 @@ body:hover #settings-toggle,
 .bookmark-item.dragging {
   opacity: 0.35;
 }
-
-.bookmark-item.drop-before::before,
-.bookmark-item.drop-after::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: var(--accent);
-  border-radius: 1px;
-  pointer-events: none;
-}
-
-.bookmark-item.drop-before::before { top: -1px; }
-.bookmark-item.drop-after::after  { bottom: -1px; }
 
 .bookmark-rename-input {
   flex: 1;
@@ -717,6 +743,50 @@ body:hover #settings-toggle,
   margin: 4px 0;
 }
 
+/* Inline confirm — replaces a `confirm: true` item's trigger with two
+   side-by-side Yes / Cancel buttons. Same pattern as the column-remove
+   confirm in edit mode. */
+.ctx-confirm {
+  display: none;
+  gap: 4px;
+  padding: 2px 4px;
+}
+
+.ctx-confirm-wrap.confirming .ctx-item {
+  display: none;
+}
+
+.ctx-confirm-wrap.confirming .ctx-confirm {
+  display: flex;
+}
+
+.ctx-confirm-yes,
+.ctx-confirm-cancel {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-family);
+  font-size: var(--font-base);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.ctx-confirm-yes.danger {
+  color: #d44;
+}
+
+.ctx-confirm-yes:hover {
+  border-color: #d44;
+  color: #d44;
+}
+
+.ctx-confirm-cancel:hover {
+  background: var(--hover);
+}
+
 /* ── Scrollbars ──────────────────────────────────────────────────────────────── */
 
 ::-webkit-scrollbar {
@@ -735,4 +805,209 @@ body:hover #settings-toggle,
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--handle-active);
+}
+
+/* ── Edit mode overlay ──────────────────────────────────────────────────────── */
+
+/* All edit-mode controls live in the DOM always so toggling is just a class
+   switch on body — no re-render needed for show/hide of these controls. */
+.edit-col-remove,
+.edit-col-grip,
+.edit-folder-remove,
+.edit-add-folder,
+.edit-add-column,
+.edit-exit-btn {
+  display: none;
+}
+
+.edit-mode .edit-folder-remove {
+  display: flex;
+}
+
+.edit-mode .edit-col-remove,
+.edit-mode .edit-col-grip,
+.edit-mode .edit-add-folder,
+.edit-mode .edit-add-column,
+.edit-mode .edit-exit-btn {
+  display: block;
+}
+
+/* Drag handle at the top of each column — initiates column reorder. */
+.edit-col-grip {
+  margin-bottom: 22px;
+  font-size: var(--font-sm);
+  line-height: 1;
+  color: var(--text-muted);
+  opacity: 0.6;
+  cursor: grab;
+  user-select: none;
+}
+
+.edit-col-grip:hover {
+  opacity: 1;
+}
+
+.edit-col-grip:active {
+  cursor: grabbing;
+}
+
+.column.col-dragging {
+  opacity: 0.35;
+}
+
+
+/* Remove-column control — wrapper that swaps between the trigger button
+   and an inline Yes / Cancel confirmation. */
+.edit-col-remove {
+  width: 100%;
+  margin-top: 6px;
+}
+
+.edit-col-remove-trigger,
+.edit-col-remove-yes,
+.edit-col-remove-cancel {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-family);
+  font-size: var(--font-ui);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.edit-col-remove-trigger:hover,
+.edit-col-remove-yes:hover {
+  border-color: #d44;
+  color: #d44;
+}
+
+.edit-col-remove-cancel:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.edit-col-remove-confirm {
+  display: none;
+  gap: 4px;
+}
+
+.edit-col-remove.confirming .edit-col-remove-trigger {
+  display: none;
+}
+
+.edit-col-remove.confirming .edit-col-remove-confirm {
+  display: flex;
+}
+
+/* Folder × — top-right of folder-group, no chrome, just the glyph. */
+.edit-folder-remove {
+  position: absolute;
+  top: 0;
+  right: 0;
+  background: none;
+  border: none;
+  padding: 0 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--font-md);
+  line-height: 1;
+  align-items: center;
+  justify-content: center;
+  z-index: 4;
+}
+
+.edit-folder-remove:hover {
+  color: #d44;
+}
+
+/* Per-column "+ Add…" dropdown */
+.edit-add-folder {
+  /* No top margin — the last folder-group's padding-bottom (22px) already
+     provides the spacer. */
+  margin-top: 0;
+}
+
+.edit-add-folder select {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-family);
+  font-size: var(--font-ui);
+  text-align: center;
+  text-align-last: center;
+  cursor: pointer;
+  appearance: none;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.edit-add-folder select:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.edit-add-folder select:focus {
+  outline: none;
+}
+
+.edit-add-folder select:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* "+ Add column" button at the right end — top-aligned with the "Done editing"
+   button (top: 14px). */
+.edit-add-column {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 14px;
+  margin-left: 14px;
+  padding: 6px 14px;
+  border: 1px dashed var(--border);
+  border-radius: 5px;
+  background: none;
+  color: var(--text-muted);
+  font-family: var(--font-family);
+  font-size: var(--font-ui);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.edit-add-column:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Floating "Done" button — top-right, in place of the settings icon. */
+.edit-exit-btn {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  padding: 6px 14px;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  border-radius: 6px;
+  font-family: var(--font-family);
+  font-size: var(--font-ui);
+  cursor: pointer;
+  z-index: 150;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.edit-exit-btn:hover {
+  filter: brightness(1.05);
+}
+
+/* Hide the settings toggle while editing so the two don't crowd each other. */
+.edit-mode #settings-toggle {
+  display: none;
 }

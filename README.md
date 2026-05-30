@@ -1,0 +1,88 @@
+# New Tab Bookmark Columns
+
+A Chrome extension that replaces the new tab page with a clean, customizable bookmark viewer organized in resizable columns.
+
+**Version 1.1.0** — preparing for Chrome Web Store release.
+
+---
+
+## Features
+
+- **Resizable columns** of bookmark folders, dragged via the dividers between columns
+- **Inline edit mode** for arranging columns and folders: per-column drag handle, `+ Add item` dropdown, `× Remove column`, and a floating **Done editing** button
+- **Drag-and-drop reordering** for bookmarks and subfolders inside a folder, with macOS Finder–style horizontal drop indicators
+- **Per-column hidden state** — hiding a folder in one column does not affect it in another
+- **Subfolders** display inline in their natural order, collapsible with persistent open/closed state
+- **Widgets** that share `col.folderIds` with regular folders:
+  - **Recently added** — newest bookmarks
+  - **Status** — total bookmarks, unique domains, duplicate bookmarks
+  - **Search** — instant filter across all bookmarks
+- **Themes** — system / light / dark, with a live listener on the system preference
+- **Display settings** — toggle bookmark dividers, folder title dividers, column dividers, and hidden items
+- **Favicons** — apple-touch-icon → Chrome favicon fallback, domain-level cache, persisted in `chrome.storage.local`
+- **Inline confirmations** for destructive actions (delete folder, delete bookmark)
+- **Keyboard** — Esc closes the settings panel or exits edit mode
+
+---
+
+## Install (development)
+
+1. Clone or download this repo
+2. Open `chrome://extensions`
+3. Enable **Developer mode** (top right)
+4. Click **Load unpacked** and select the project folder
+5. Open a new tab
+
+The extension overrides Chrome's new tab page via `chrome_url_overrides`.
+
+---
+
+## Permissions
+
+- `bookmarks` — read and write your Chrome bookmark tree
+- `storage` — persist theme, column layout, favicon cache, folder open/closed state, hidden IDs
+- `favicon` — fetch site favicons via Chrome's internal `_favicon/` URL
+
+No remote requests are made beyond the per-domain `apple-touch-icon.png` probe used by the favicon fallback chain. Nothing is sent to a third-party server.
+
+---
+
+## Tech
+
+- Chrome Extension Manifest V3
+- Vanilla JS — no frameworks, no build step
+- CSS custom properties for the full design token system (color, typography, spacing)
+- `chrome.bookmarks` for tree reads and `move`/`update`/`remove`
+- `chrome.storage.local` for all persistent state
+- HTML5 Drag and Drop API + FLIP animations for column / folder / bookmark reorder
+- `data-theme` attribute on `<html>` for light/dark switching; system theme uses `window.matchMedia` with a live listener
+
+---
+
+## File structure
+
+```
+new-tab/
+  manifest.json    — Extension manifest (MV3)
+  newtab.html      — Single-page shell, settings panel markup
+  newtab.js        — All logic: boot, rendering, drag/drop, context menus, persistence
+  newtab.css       — Design tokens, layout, component styles
+  icons/           — Extension icons (16, 32, 48, 128 px PNGs)
+  CHANGELOG.md     — Versioned changelog
+  README.md        — This file
+  about.md         — Design notes and learnings
+```
+
+---
+
+## Release status
+
+- [x] Version bumped to 1.1.0
+- [x] CHANGELOG written
+- [x] Manual smoke test pass
+- [ ] Store screenshots (1280×800 or 640×400 px)
+- [ ] Store listing description
+- [ ] Chrome Web Store Developer Dashboard registration ($5 one-time)
+- [ ] Zip and upload
+
+See `CHANGELOG.md` for the full release notes.

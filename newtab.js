@@ -4,29 +4,59 @@
 
 const DEFAULT_WIDTH = 260;
 
+// Widgets share `col.folderIds` with regular folders — special sentinel IDs.
+const RECENT_WIDGET_ID = '__widget:recent__';
+const STATUS_WIDGET_ID = '__widget:status__';
+const SEARCH_WIDGET_ID = '__widget:search__';
+const WIDGET_TITLES = {
+  [RECENT_WIDGET_ID]: 'Recently added',
+  [STATUS_WIDGET_ID]: 'Status',
+  [SEARCH_WIDGET_ID]: 'Search',
+};
+const RECENT_LIMIT = 15;
+const SEARCH_LIMIT = 15;
+
 let state = {
   theme: 'system',
   dividers: false,
   hideHandles: false,
   showHidden: false,
+  hideFolderDividers: false,
   columns: [],   // [{ id: string, width: number, folderIds: string[] }]
 };
 
 let allFolders = [];   // flat list of all BookmarkTreeNode folders
+let allBookmarks = []; // flat list of all URL bookmarks (for stats widget)
+let recentBookmarks = []; // most-recently-added URL bookmarks (for the widget)
 let faviconCache = {}; // { [domain]: url | "chrome" | "none" }
 let hiddenIds = {}; // { [colId: string]: Set<string> } — per-column hidden IDs
 let draggedItem = null;  // { node, folderId } during drag (bookmark or subfolder)
+// Snapshotted by container.dragover; used as a fallback in source.dragend if
+// the drop event didn't fire for some reason (e.g. cursor moved at the last
+// moment). Cleared on a successful drop.
+let pendingItemDrop = null;  // { container, folderId } or null
+// Main-view top-level folder drag (move folder between columns / reorder within).
+let mainDragFid = null;
+let mainDragDropped = false;
+let mainDragSnapshot = null; // { columns: [{colId, left, right}], groups: { [colId]: [{fid, mid}] } }
+// Column reorder (edit-mode only) — drag entire columns left/right.
+let colDragId = null;
+let colDragSnapshot = null;   // [{colId, left, right, mid}]
+let colDragDropped = false;
 let ctxMenu = null;    // singleton context menu element
 let folderOpen = {};   // { [folderId]: boolean } subfolder open state
+let searchQuery = '';  // session-only — persists across re-renders, not across reloads
+let editMode = false;  // session-only — column-view inline edit overlay
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', async () => {
-  const stored = await chrome.storage.local.get(['theme', 'dividers', 'hideHandles', 'showHidden', 'columns', 'faviconCache', 'folderOpen', 'hiddenIds']);
-  if (stored.theme)               state.theme       = stored.theme;
-  if (stored.dividers != null)    state.dividers    = stored.dividers;
-  if (stored.hideHandles != null) state.hideHandles = stored.hideHandles;
-  if (stored.showHidden != null)  state.showHidden  = stored.showHidden;
+  const stored = await chrome.storage.local.get(['theme', 'dividers', 'hideHandles', 'showHidden', 'hideFolderDividers', 'columns', 'faviconCache', 'folderOpen', 'hiddenIds']);
+  if (stored.theme)                       state.theme              = stored.theme;
+  if (stored.dividers != null)            state.dividers           = stored.dividers;
+  if (stored.hideHandles != null)         state.hideHandles        = stored.hideHandles;
+  if (stored.showHidden != null)          state.showHidden         = stored.showHidden;
+  if (stored.hideFolderDividers != null)  state.hideFolderDividers = stored.hideFolderDividers;
   if (stored.columns?.length)     state.columns     = stored.columns;
   if (stored.faviconCache)        faviconCache      = stored.faviconCache;
   if (stored.folderOpen)          folderOpen        = stored.folderOpen;
@@ -39,18 +69,45 @@ document.addEventListener('DOMContentLoaded', async () => {
   applyTheme(state.theme);
   applyDividers(state.dividers);
   applyHideHandles(state.hideHandles);
+  applyHideFolderDividers(state.hideFolderDividers);
 
   const tree = await chrome.bookmarks.getTree();
   allFolders = collectFolders(tree[0]);
+  allBookmarks = collectBookmarks(tree[0]);
+  await loadRecent();
 
   if (!state.columns.length) {
     state.columns = defaultColumns(tree[0]);
     await persist();
   }
 
+  pruneHiddenIds();
   renderColumns();
+  setupContainerDragHandlers();
   setupSettings();
+
+  // Live updates: refresh when bookmarks change anywhere in the browser (other
+  // tabs, bookmark manager, sync). Debounced so bulk operations don't thrash.
+  const debouncedRefresh = debounce(refresh, 300);
+  chrome.bookmarks.onCreated.addListener(debouncedRefresh);
+  chrome.bookmarks.onChanged.addListener(debouncedRefresh);
+  chrome.bookmarks.onRemoved.addListener(debouncedRefresh);
+  chrome.bookmarks.onMoved.addListener(debouncedRefresh);
 });
+
+function debounce(fn, ms) {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+}
+
+async function loadRecent() {
+  // getRecent can include folder nodes — filter to URL bookmarks.
+  const items = await chrome.bookmarks.getRecent(RECENT_LIMIT * 2);
+  recentBookmarks = items.filter(b => b.url).slice(0, RECENT_LIMIT);
+}
 
 // ─── Bookmarks ────────────────────────────────────────────────────────────────
 
@@ -62,37 +119,26 @@ function collectFolders(node, acc = []) {
   return acc;
 }
 
+function collectBookmarks(node, acc = []) {
+  if (node.url) acc.push(node);
+  if (node.children) for (const child of node.children) collectBookmarks(child, acc);
+  return acc;
+}
+
 function defaultColumns(root) {
-  // The bookmark tree root has two standard children:
-  //   id "1" = Bookmarks bar
-  //   id "2" = Other bookmarks
-  // (some profiles also have "3" = Mobile bookmarks)
+  // First-install default: a single column with the Bookmarks bar + Search
+  // widget. Simple, immediately useful, and demonstrates both concepts.
+  // The bookmark tree root has standard children:
+  //   id "1" = Bookmarks bar  (preferred)
+  //   id "2" = Other bookmarks (fallback)
   const containers = root.children ?? [];
-
-  const bar = containers.find(n => n.id === '1');
-
-  const cols = [];
-
-  // Try subfolders of the bookmarks bar first (one column each)
-  const barFolders = (bar?.children ?? []).filter(n => n.children);
-  if (barFolders.length) {
-    barFolders.forEach((f, i) => {
-      cols.push({ id: `col-${i}-${Date.now()}`, width: DEFAULT_WIDTH, folderIds: [f.id] });
-    });
-    return cols;
-  }
-
-  // No subfolders — treat the bar itself as one column
-  if (bar) cols.push({ id: `col-0-${Date.now()}`, width: DEFAULT_WIDTH, folderIds: [bar.id] });
-
-  // Last resort: one column per top-level container
-  if (!cols.length) {
-    containers.forEach((n, i) => {
-      if (n.children) cols.push({ id: `col-${i}-${Date.now()}`, width: DEFAULT_WIDTH, folderIds: [n.id] });
-    });
-  }
-
-  return cols;
+  const bar = containers.find(n => n.id === '1') ?? containers[0];
+  const folderIds = bar ? [bar.id, SEARCH_WIDGET_ID] : [SEARCH_WIDGET_ID];
+  return [{
+    id: `col-0-${Date.now()}`,
+    width: DEFAULT_WIDTH,
+    folderIds,
+  }];
 }
 
 function folderById(id) {
@@ -158,6 +204,156 @@ function persistHiddenIds() {
   chrome.storage.local.set({ hiddenIds: serialized });
 }
 
+// FLIP animation via CSS transitions: snapshot visual rects, mutate the DOM, then
+// apply an inverse transform with transitions disabled before clearing it on the
+// next frame so the CSS `transition: transform` on the target elements animates them
+// back to identity. Using CSS transitions (vs. WAAPI cancel/re-animate) interrupts
+// in-flight motion smoothly when dragover fires repeatedly.
+// Clears the drop-position indicators inside a scope (Element or Document).
+function clearDropIndicators(scope) {
+  scope.querySelectorAll('.drop-before, .drop-after').forEach(el =>
+    el.classList.remove('drop-before', 'drop-after')
+  );
+}
+
+// Processes a bookmark/subfolder reorder using the indicator state captured by
+// the most recent container.dragover. Called from dragend as a fallback when
+// the drop event didn't process (or didn't fire). No-op if there's nothing to
+// commit.
+async function flushPendingItemDrop() {
+  if (!pendingItemDrop || !draggedItem) return;
+  const { container: cont, folderId } = pendingItemDrop;
+  pendingItemDrop = null;
+
+  const beforeEl = cont.querySelector(':scope > .drop-before');
+  const afterEl  = cont.querySelector(':scope > .drop-after');
+  if (!beforeEl && !afterEl) return;
+
+  const allSiblings = [...cont.querySelectorAll(':scope > .bookmark-item, :scope > .subfolder-group')];
+  let targetIdx = beforeEl
+    ? allSiblings.indexOf(beforeEl)
+    : allSiblings.indexOf(afterEl) + 1;
+
+  const draggedEl = cont.querySelector(`:scope > [data-id="${draggedItem.node.id}"]`);
+  if (draggedEl && beforeEl) {
+    const draggedIdx = allSiblings.indexOf(draggedEl);
+    if (draggedIdx < targetIdx) targetIdx -= 1;
+  }
+
+  const nodeId = draggedItem.node.id;
+  clearDropIndicators(cont);
+  await chrome.bookmarks.move(nodeId, { parentId: folderId, index: targetIdx });
+  refresh();
+}
+
+// Suppresses the browser's default cursor-following drag image. Used by every
+// custom drag (folder-group / column) so the in-place dimmed element is the
+// only visual. Bookmark + subfolder reorder keep the default drag image
+// (cursor-follower) and use a horizontal drop-indicator line instead.
+function suppressDragImage(e) {
+  const empty = document.createElement('canvas');
+  empty.width = 1; empty.height = 1;
+  empty.style.cssText = 'position:fixed;left:-9999px;top:-9999px';
+  document.body.appendChild(empty);
+  e.dataTransfer.setDragImage(empty, 0, 0);
+  requestAnimationFrame(() => empty.remove());
+}
+
+function flipElements(els, mutate, afterMutate) {
+  const before = new Map();
+  els.forEach(el => before.set(el, el.getBoundingClientRect()));
+
+  // Kill any in-flight transition and clear residual transform so the next
+  // measurement reflects the element's natural (untransformed) DOM position.
+  els.forEach(el => {
+    el.style.transition = 'none';
+    el.style.transform = '';
+  });
+
+  mutate();
+
+  // Hook for callers that need to read post-mutate layout positions before
+  // we apply inverse transforms (which would put visual rects back to pre-mutate).
+  if (afterMutate) afterMutate();
+
+  els.forEach(el => {
+    const a = before.get(el);
+    if (!a) return;
+    const b = el.getBoundingClientRect();
+    const dx = a.left - b.left;
+    const dy = a.top - b.top;
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+    el.style.transform = `translate(${dx}px, ${dy}px)`;
+  });
+
+  // Next frame: re-enable transition and clear transform → CSS animates to identity.
+  requestAnimationFrame(() => {
+    els.forEach(el => {
+      el.style.transition = '';
+      el.style.transform = '';
+    });
+  });
+}
+
+function snapshotMainLayout() {
+  const cols = [...document.querySelectorAll('#columns-container .column')];
+  const snap = { columns: [], groups: {} };
+  cols.forEach(col => {
+    const r = col.getBoundingClientRect();
+    snap.columns.push({ colId: col.dataset.colId, left: r.left, right: r.right });
+    snap.groups[col.dataset.colId] = [...col.querySelectorAll(':scope > .folder-group')].map(g => {
+      const gr = g.getBoundingClientRect();
+      return { fid: g.dataset.fid, mid: gr.top + gr.height / 2 };
+    });
+  });
+  return snap;
+}
+
+function flipFolderGroups(mutate) {
+  flipElements([...document.querySelectorAll('#columns-container .folder-group')], mutate);
+}
+
+function commitMainDragToState() {
+  const cols = [...document.querySelectorAll('#columns-container .column')];
+  cols.forEach(colEl => {
+    const stateCol = state.columns.find(c => c.id === colEl.dataset.colId);
+    if (!stateCol) return;
+    stateCol.folderIds = [...colEl.querySelectorAll(':scope > .folder-group')].map(g => g.dataset.fid);
+  });
+  persist();
+  renderColumns();
+}
+
+function snapshotColumns() {
+  return [...document.querySelectorAll('#columns-container .column')].map(c => {
+    const r = c.getBoundingClientRect();
+    return {
+      colId: c.dataset.colId,
+      left:  r.left,
+      right: r.right,
+      mid:   r.left + r.width / 2,
+    };
+  });
+}
+
+function commitColumnDragToState() {
+  // Read post-drag DOM order; same pattern as commitMainDragToState.
+  const cols = [...document.querySelectorAll('#columns-container .column')];
+  const byId = new Map(state.columns.map(c => [c.id, c]));
+  state.columns = cols.map(c => byId.get(c.dataset.colId)).filter(Boolean);
+  persist();
+  renderColumns();
+}
+
+function flipColumns(mutate) {
+  // Include both columns and the resize handles between them — handles travel
+  // with their adjacent column during a reorder, so they need to FLIP too.
+  flipElements([
+    ...document.querySelectorAll('#columns-container .column'),
+    ...document.querySelectorAll('#columns-container .resize-handle'),
+  ], mutate);
+}
+
 function isHidden(id, colId) {
   return hiddenIds[colId]?.has(id) ?? false;
 }
@@ -194,39 +390,669 @@ function renderColumns() {
     if (i > 0) {
       container.appendChild(makeHandle(i - 1));
     }
-    container.appendChild(makeColumn(col));
+    container.appendChild(makeColumn(col, i));
   });
 
   // Handle + spacer after the last column so it's also resizable
   if (state.columns.length > 0) {
     container.appendChild(makeHandle(state.columns.length - 1));
+  }
+
+  // Edit-mode "+ Add column" button (CSS-hidden unless body.edit-mode)
+  const addColBtn = document.createElement('button');
+  addColBtn.className = 'edit-add-column';
+  addColBtn.textContent = '+ Add column';
+  addColBtn.addEventListener('click', () => {
+    state.columns.push({ id: `col-${Date.now()}`, width: DEFAULT_WIDTH, folderIds: [] });
+    persist();
+    renderColumns();
+  });
+  container.appendChild(addColBtn);
+
+  if (state.columns.length > 0) {
     const spacer = document.createElement('div');
     spacer.className = 'column-spacer';
     container.appendChild(spacer);
   }
+
+}
+
+// Attach the main-view drag handlers once. They reference module-level state
+// (mainDragFid/Snapshot, colDragId/Snapshot/TargetIdx) so they survive any
+// number of column re-renders without reattachment.
+function setupContainerDragHandlers() {
+  const container = document.getElementById('columns-container');
+
+  container.ondragover = e => {
+    // Column reorder (edit-mode drag) — FLIP-animates the columns around the
+    // dragged one. Resize handles are hidden via the `cols-dragging` class.
+    if (colDragId !== null && colDragSnapshot) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+
+      const nonDragged = colDragSnapshot.filter(c => c.colId !== colDragId);
+      let idx = nonDragged.length;
+      for (let i = 0; i < nonDragged.length; i++) {
+        if (e.clientX < nonDragged[i].mid) { idx = i; break; }
+      }
+
+      const draggedCol = container.querySelector(`.column[data-col-id="${colDragId}"]`);
+      if (!draggedCol) return;
+      const currentNonDragged = [...container.querySelectorAll('.column')]
+        .filter(c => c.dataset.colId !== colDragId);
+      // Anchor against the "+ Add column" button when inserting at the end so
+      // the dragged column doesn't slip past it.
+      const refCol = currentNonDragged[idx]
+        || container.querySelector('.edit-add-column');
+
+      // The handle immediately to the dragged column's right travels with it,
+      // so reordering doesn't leave a doubled-up handle next to the previous
+      // column's handle.
+      const handleRight = draggedCol.nextElementSibling;
+      const movingHandle = handleRight?.classList.contains('resize-handle') ? handleRight : null;
+
+      if (movingHandle
+            ? movingHandle.nextSibling === refCol
+            : draggedCol.nextSibling === refCol) return; // already in place
+
+      flipColumns(() => {
+        container.insertBefore(draggedCol, refCol);
+        if (movingHandle) container.insertBefore(movingHandle, draggedCol.nextSibling);
+      });
+      return;
+    }
+
+    if (mainDragFid === null || !mainDragSnapshot) return;
+
+    // Target column by cursor.x — only preventDefault (and thus accept a drop)
+    // when the cursor is actually over a column. Releasing in dead space
+    // (resize handles / spacer) cancels and dragend restores the original.
+    const targetCol = mainDragSnapshot.columns.find(c => e.clientX >= c.left && e.clientX <= c.right);
+    if (!targetCol) return;
+
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+
+    // Insertion index by cursor.y vs snapshotted folder-group mids (excluding dragged)
+    const groupsInCol = (mainDragSnapshot.groups[targetCol.colId] || []).filter(g => g.fid !== mainDragFid);
+    let idx = groupsInCol.length;
+    for (let i = 0; i < groupsInCol.length; i++) {
+      if (e.clientY < groupsInCol[i].mid) { idx = i; break; }
+    }
+
+    const targetColEl = container.querySelector(`.column[data-col-id="${targetCol.colId}"]`);
+    if (!targetColEl) return;
+    const draggedGroup = container.querySelector(`.folder-group[data-fid="${mainDragFid}"]`);
+    if (!draggedGroup) return;
+    const currentNonDragged = [...targetColEl.querySelectorAll(':scope > .folder-group')]
+      .filter(g => g.dataset.fid !== mainDragFid);
+    // When inserting at the end of the folder list, anchor against the +Add /
+    // ×Remove edit-mode controls so the dragged folder doesn't slip past them.
+    const refGroup = currentNonDragged[idx]
+      || targetColEl.querySelector(':scope > .edit-add-folder');
+    if (draggedGroup.parentElement === targetColEl && draggedGroup.nextSibling === refGroup) return;
+    flipFolderGroups(() => targetColEl.insertBefore(draggedGroup, refGroup));
+  };
+
+  container.ondrop = e => {
+    if (colDragId !== null) {
+      e.preventDefault();
+      colDragDropped = true;
+      commitColumnDragToState();
+      return;
+    }
+    if (mainDragFid === null) return;
+    e.preventDefault();
+    mainDragDropped = true;
+    commitMainDragToState();
+  };
 }
 
 async function refresh() {
   const tree = await chrome.bookmarks.getTree();
   allFolders = collectFolders(tree[0]);
+  allBookmarks = collectBookmarks(tree[0]);
+  await loadRecent();
+  pruneHiddenIds();
   renderColumns();
-  if (!document.getElementById('settings-panel').classList.contains('hidden')) {
-    renderColumnsConfig();
-  }
 }
 
-function makeColumn(col) {
+// Drop hidden-ID entries that refer to deleted bookmarks/folders or removed
+// columns so storage doesn't accumulate stale data over time.
+function pruneHiddenIds() {
+  const validIds = new Set();
+  allFolders.forEach(f => validIds.add(f.id));
+  allBookmarks.forEach(b => validIds.add(b.id));
+  const validColIds = new Set(state.columns.map(c => c.id));
+
+  let changed = false;
+  for (const colId of Object.keys(hiddenIds)) {
+    if (!validColIds.has(colId)) {
+      delete hiddenIds[colId];
+      changed = true;
+      continue;
+    }
+    const ids = hiddenIds[colId];
+    for (const id of ids) {
+      if (!validIds.has(id)) { ids.delete(id); changed = true; }
+    }
+    if (ids.size === 0) { delete hiddenIds[colId]; changed = true; }
+  }
+  if (changed) persistHiddenIds();
+}
+
+function makeColumn(col, idx) {
   const el = document.createElement('div');
   el.className = 'column';
   el.dataset.colId = col.id;
   el.style.flexBasis = `${col.width}px`;
 
+  // Edit-mode drag handle at the top of each column (CSS-hidden unless edit-mode).
+  // mousedown flips el.draggable on so only the grip — not folders/widgets —
+  // initiates a column drag.
+  const grip = document.createElement('div');
+  grip.className = 'edit-col-grip';
+  grip.textContent = `⠿  Column ${idx + 1}`;
+  grip.title = 'Drag to reorder column';
+  grip.addEventListener('mousedown', () => {
+    el.draggable = true;
+    const reset = () => {
+      el.draggable = false;
+      document.removeEventListener('mouseup', reset);
+    };
+    document.addEventListener('mouseup', reset);
+  });
+  el.appendChild(grip);
+
+  el.addEventListener('dragstart', e => {
+    if (!el.draggable) { e.preventDefault(); return; }
+    e.stopPropagation();
+    colDragId = col.id;
+    colDragDropped = false;
+    colDragSnapshot = snapshotColumns();
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', '');
+    suppressDragImage(e);
+
+    el.classList.add('col-dragging');
+  });
+
+  el.addEventListener('dragend', () => {
+    el.classList.remove('col-dragging');
+    el.draggable = false;
+    colDragId = null;
+    colDragSnapshot = null;
+    if (!colDragDropped) renderColumns();
+    colDragDropped = false;
+  });
+
   col.folderIds.forEach(fid => {
+    if (fid === RECENT_WIDGET_ID) {
+      el.appendChild(makeRecentlyAddedGroup(col.id));
+      return;
+    }
+    if (fid === STATUS_WIDGET_ID) {
+      el.appendChild(makeStatusGroup(col.id));
+      return;
+    }
+    if (fid === SEARCH_WIDGET_ID) {
+      el.appendChild(makeSearchGroup());
+      return;
+    }
     const folder = folderById(fid);
     if (folder) el.appendChild(makeFolderGroup(folder, 0, null, 0, col.id));
   });
 
+  // Edit-mode controls (CSS-hidden unless body.edit-mode)
+  el.appendChild(makeEditAddFolderControl(col));
+  el.appendChild(makeEditColumnRemove(col));
+
   return el;
+}
+
+function makeEditColumnRemove(col) {
+  // Wrapper hosts either the trigger button or, after click, an inline
+  // Yes / Cancel confirmation (instead of a native confirm() dialog).
+  const wrap = document.createElement('div');
+  wrap.className = 'edit-col-remove';
+
+  const trigger = document.createElement('button');
+  trigger.className = 'edit-col-remove-trigger';
+  trigger.title = 'Remove column';
+  trigger.textContent = '× Remove column';
+
+  const confirm = document.createElement('div');
+  confirm.className = 'edit-col-remove-confirm';
+
+  const yesBtn = document.createElement('button');
+  yesBtn.className = 'edit-col-remove-yes';
+  yesBtn.textContent = 'Yes';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'edit-col-remove-cancel';
+  cancelBtn.textContent = 'Cancel';
+
+  confirm.appendChild(yesBtn);
+  confirm.appendChild(cancelBtn);
+
+  const doDelete = () => {
+    state.columns = state.columns.filter(c => c.id !== col.id);
+    persist();
+    renderColumns();
+  };
+
+  trigger.addEventListener('click', e => {
+    e.stopPropagation();
+    e.preventDefault();
+    // Empty columns don't need confirmation.
+    if (col.folderIds.length === 0) { doDelete(); return; }
+    wrap.classList.add('confirming');
+  });
+  yesBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    e.preventDefault();
+    doDelete();
+  });
+  cancelBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    e.preventDefault();
+    wrap.classList.remove('confirming');
+  });
+
+  wrap.appendChild(trigger);
+  wrap.appendChild(confirm);
+  return wrap;
+}
+
+function makeEditAddFolderControl(col) {
+  const wrap = document.createElement('div');
+  wrap.className = 'edit-add-folder';
+
+  const assigned = new Set(state.columns.flatMap(c => c.folderIds));
+  const available = allFolders.filter(f => !assigned.has(f.id));
+  const availableWidgets = Object.keys(WIDGET_TITLES).filter(id => !assigned.has(id));
+
+  const sel = document.createElement('select');
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = '+ Add item';
+  // Stays as the closed-state label but is hidden + unselectable in the open
+  // dropdown list.
+  placeholder.selected = true;
+  placeholder.disabled = true;
+  placeholder.hidden = true;
+  sel.appendChild(placeholder);
+
+  if (availableWidgets.length) {
+    const wg = document.createElement('optgroup');
+    wg.label = 'Widgets';
+    availableWidgets.forEach(wid => {
+      const opt = document.createElement('option');
+      opt.value = wid;
+      opt.textContent = WIDGET_TITLES[wid];
+      wg.appendChild(opt);
+    });
+    sel.appendChild(wg);
+  }
+
+  if (available.length) {
+    const fg = availableWidgets.length ? document.createElement('optgroup') : sel;
+    if (fg !== sel) fg.label = 'Folders';
+    available.forEach(f => {
+      const opt = document.createElement('option');
+      opt.value = f.id;
+      opt.textContent = f.title;
+      fg.appendChild(opt);
+    });
+    if (fg !== sel) sel.appendChild(fg);
+  }
+
+  sel.addEventListener('change', () => {
+    if (!sel.value) return;
+    col.folderIds.push(sel.value);
+    persist();
+    renderColumns();
+  });
+
+  wrap.appendChild(sel);
+  return wrap;
+}
+
+// Edit-mode "remove from column" × — visible only when body.edit-mode is on.
+function makeEditFolderRemove(fid) {
+  const btn = document.createElement('button');
+  btn.className = 'edit-folder-remove';
+  btn.title = 'Remove from column';
+  btn.textContent = '×';
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    e.preventDefault();
+    const col = state.columns.find(c => c.folderIds.includes(fid));
+    if (!col) return;
+    col.folderIds = col.folderIds.filter(id => id !== fid);
+    persist();
+    renderColumns();
+  });
+  return btn;
+}
+
+function attachTopLevelDragHandlers(group) {
+  // Default false; only the label flips it true on mousedown so interactive
+  // children (search input, bookmarks) don't initiate a folder drag.
+  group.draggable = false;
+
+  const label = group.querySelector('.folder-label');
+  if (label) {
+    label.addEventListener('mousedown', () => {
+      group.draggable = true;
+      const reset = () => {
+        group.draggable = false;
+        document.removeEventListener('mouseup', reset);
+      };
+      document.addEventListener('mouseup', reset);
+    });
+  }
+
+  group.addEventListener('dragstart', e => {
+    e.stopPropagation();
+    mainDragFid = group.dataset.fid;
+    mainDragDropped = false;
+    e.dataTransfer.effectAllowed = 'move';
+
+    // Chrome infers a "link drag" when the source contains <a href> children
+    // (our bookmark items) and decorates the cursor with a globe icon.
+    // Setting non-link drag data shuts that off.
+    e.dataTransfer.setData('text/plain', '');
+
+    // Suppress the cursor-following drag image — the in-place dimmed folder
+    // (which FLIP-animates to wherever it would land) is the only visual
+    // representation.
+    suppressDragImage(e);
+
+    // For tall folders, show only the first SHOWN direct items in the in-place
+    // ghost — the rest are hidden and a "+ N more" placeholder takes their
+    // place. Short folders keep their full ghost.
+    const SHOWN = 13;
+    const directItems = [...group.querySelectorAll(
+      ':scope > .bookmark-item, :scope > .subfolder-group'
+    )];
+    const overflow = directItems.slice(SHOWN);
+
+    if (overflow.length) {
+      // Surrounding folder-groups FLIP-animate up into the freed space.
+      // Snapshot inside the FLIP hook (post-mutate, pre-inverse-transform) so
+      // getBoundingClientRect returns the truncated layout positions.
+      const others = [...document.querySelectorAll('#columns-container .folder-group')]
+        .filter(g => g !== group);
+      flipElements(
+        others,
+        () => {
+          group.classList.add('dragging');
+          overflow.forEach(it => it.style.display = 'none');
+          const more = document.createElement('div');
+          more.className = 'drag-more-indicator';
+          more.textContent = `+ ${overflow.length} more`;
+          group.appendChild(more);
+        },
+        () => { mainDragSnapshot = snapshotMainLayout(); }
+      );
+    } else {
+      group.classList.add('dragging');
+      mainDragSnapshot = snapshotMainLayout();
+    }
+  });
+  group.addEventListener('dragend', () => {
+    group.classList.remove('dragging');
+    group.draggable = false; // safety reset (in case mouseup didn't fire)
+    mainDragFid = null;
+    mainDragSnapshot = null;
+    if (!mainDragDropped) renderColumns(); // user cancelled — restore from state
+    mainDragDropped = false;
+  });
+}
+
+
+function makeRecentlyAddedGroup(colId) {
+  const group = document.createElement('div');
+  group.className = 'folder-group';
+  group.dataset.fid = RECENT_WIDGET_ID;
+
+  const label = document.createElement('div');
+  label.className = 'folder-label';
+  label.textContent = WIDGET_TITLES[RECENT_WIDGET_ID];
+  group.appendChild(label);
+
+  recentBookmarks.forEach(bm => {
+    if (!state.showHidden && isHidden(bm.id, colId)) return;
+    const a = document.createElement('a');
+    a.className = 'bookmark-item';
+    if (isHidden(bm.id, colId)) a.classList.add('item-hidden');
+    a.href = bm.url;
+    a.title = bm.title || bm.url;
+    a.dataset.id = bm.id;
+
+    const img = makeFavicon(bm.url);
+    if (img) a.appendChild(img);
+
+    const span = document.createElement('span');
+    span.className = 'bookmark-title';
+    span.textContent = bm.title || bm.url;
+    a.appendChild(span);
+
+    a.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      showCtxMenu(e.clientX, e.clientY, [
+        { label: isHidden(bm.id, colId) ? 'Show' : 'Hide', action: () => toggleHidden(bm.id, colId) },
+      ]);
+    });
+
+    group.appendChild(a);
+  });
+
+  group.appendChild(makeEditFolderRemove(RECENT_WIDGET_ID));
+  attachTopLevelDragHandlers(group);
+  return group;
+}
+
+function computeStats() {
+  const totalBookmarks = allBookmarks.length;
+  const totalFolders   = allFolders.length;
+
+  // Bookmarks reachable from any configured (non-widget, non-hidden) folder.
+  const shown = new Set();
+  state.columns.forEach(col => {
+    const hiddenSet = hiddenIds[col.id] || new Set();
+    col.folderIds.forEach(fid => {
+      if (WIDGET_TITLES[fid] !== undefined) return;
+      if (hiddenSet.has(fid)) return;
+      const folder = folderById(fid);
+      if (folder) collectVisibleBookmarkIds(folder, shown, hiddenSet);
+    });
+  });
+
+  // Hidden items across all columns (folders + bookmarks)
+  let hiddenCount = 0;
+  for (const ids of Object.values(hiddenIds)) hiddenCount += ids.size;
+
+  // Unique domains — strip leading "www." so apex/www aren't split.
+  const domains = new Set();
+  allBookmarks.forEach(bm => {
+    try {
+      domains.add(new URL(bm.url).hostname.replace(/^www\./, ''));
+    } catch {}
+  });
+
+  // Duplicates = total - unique-URL count
+  const uniqueUrls = new Set(allBookmarks.map(b => b.url));
+  const duplicateCount = totalBookmarks - uniqueUrls.size;
+
+  const emptyFolders = allFolders.filter(f => !f.children || f.children.length === 0).length;
+
+  return {
+    totalBookmarks,
+    totalFolders,
+    shownCount: shown.size,
+    hiddenCount,
+    uniqueDomains: domains.size,
+    duplicateCount,
+    emptyFolders,
+  };
+}
+
+function collectVisibleBookmarkIds(node, acc, hiddenSet) {
+  if (!node.children) return;
+  for (const c of node.children) {
+    if (hiddenSet.has(c.id)) continue;
+    if (c.url) acc.add(c.id);
+    else collectVisibleBookmarkIds(c, acc, hiddenSet);
+  }
+}
+
+function makeStatusGroup(/* colId */) {
+  const group = document.createElement('div');
+  group.className = 'folder-group';
+  group.dataset.fid = STATUS_WIDGET_ID;
+
+  const label = document.createElement('div');
+  label.className = 'folder-label';
+  label.textContent = WIDGET_TITLES[STATUS_WIDGET_ID];
+  group.appendChild(label);
+
+  const stats = computeStats();
+
+  const row = (text, value) => {
+    const r = document.createElement('div');
+    r.className = 'status-row';
+    const l = document.createElement('span');
+    l.className = 'status-row-label';
+    l.textContent = text;
+    const v = document.createElement('span');
+    v.className = 'status-row-value';
+    v.textContent = value;
+    r.appendChild(l);
+    r.appendChild(v);
+    return r;
+  };
+
+  const fmt = n => n.toLocaleString();
+  group.appendChild(row('Bookmarks',      fmt(stats.totalBookmarks)));
+  group.appendChild(row('Folders',        fmt(stats.totalFolders)));
+  group.appendChild(row('Shown',          `${fmt(stats.shownCount)} / ${fmt(stats.totalBookmarks)}`));
+  if (stats.hiddenCount > 0) group.appendChild(row('Hidden', fmt(stats.hiddenCount)));
+  group.appendChild(row('Unique domains', fmt(stats.uniqueDomains)));
+
+  const healthRows = [];
+  if (stats.duplicateCount > 0) healthRows.push(['Duplicate bookmarks', stats.duplicateCount]);
+  if (stats.emptyFolders > 0)   healthRows.push(['Empty folders',  stats.emptyFolders]);
+  if (healthRows.length) {
+    const sub = document.createElement('div');
+    sub.className = 'status-subheader';
+    sub.textContent = 'Health';
+    group.appendChild(sub);
+    healthRows.forEach(([t, v]) => group.appendChild(row(t, fmt(v))));
+  }
+
+  group.appendChild(makeEditFolderRemove(STATUS_WIDGET_ID));
+  attachTopLevelDragHandlers(group);
+  return group;
+}
+
+function makeSearchGroup() {
+  const group = document.createElement('div');
+  group.className = 'folder-group';
+  group.dataset.fid = SEARCH_WIDGET_ID;
+
+  const label = document.createElement('div');
+  label.className = 'folder-label';
+  label.textContent = WIDGET_TITLES[SEARCH_WIDGET_ID];
+  group.appendChild(label);
+
+  const inputWrap = document.createElement('div');
+  inputWrap.className = 'search-input-wrap';
+
+  const input = document.createElement('input');
+  input.className = 'search-input';
+  input.type = 'search';
+  input.placeholder = 'Search bookmarks…';
+  input.value = searchQuery;
+  // Don't let cmd/ctrl-A inside the input bubble to anything global.
+  input.addEventListener('keydown', e => e.stopPropagation());
+  inputWrap.appendChild(input);
+
+  const clear = document.createElement('button');
+  clear.className = 'search-clear';
+  clear.type = 'button';
+  clear.textContent = '×';
+  clear.title = 'Clear';
+  clear.addEventListener('click', () => {
+    input.value = '';
+    searchQuery = '';
+    renderResults();
+    input.focus();
+  });
+  inputWrap.appendChild(clear);
+
+  group.appendChild(inputWrap);
+
+  const results = document.createElement('div');
+  results.className = 'search-results';
+  group.appendChild(results);
+
+  const renderResults = () => {
+    results.innerHTML = '';
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return;
+
+    const matches = [];
+    for (const bm of allBookmarks) {
+      if ((bm.title || '').toLowerCase().includes(q) || bm.url.toLowerCase().includes(q)) {
+        matches.push(bm);
+        if (matches.length >= SEARCH_LIMIT) break;
+      }
+    }
+
+    if (!matches.length) {
+      const empty = document.createElement('div');
+      empty.className = 'search-empty';
+      empty.textContent = 'No results';
+      results.appendChild(empty);
+      return;
+    }
+
+    matches.forEach(bm => {
+      const a = document.createElement('a');
+      a.className = 'bookmark-item';
+      a.href = bm.url;
+      a.title = bm.title || bm.url;
+      a.dataset.id = bm.id;
+
+      const img = makeFavicon(bm.url);
+      if (img) a.appendChild(img);
+
+      const span = document.createElement('span');
+      span.className = 'bookmark-title';
+      span.textContent = bm.title || bm.url;
+      a.appendChild(span);
+
+      results.appendChild(a);
+    });
+  };
+
+  // Debounce so each keystroke doesn't iterate allBookmarks
+  let t;
+  input.addEventListener('input', () => {
+    clearTimeout(t);
+    t = setTimeout(() => {
+      searchQuery = input.value;
+      renderResults();
+    }, 80);
+  });
+
+  renderResults();
+
+  group.appendChild(makeEditFolderRemove(SEARCH_WIDGET_ID));
+  attachTopLevelDragHandlers(group);
+  return group;
 }
 
 function makeFolderGroup(folder, depth = 0, siblings = null, idx = 0, colId = null) {
@@ -234,7 +1060,10 @@ function makeFolderGroup(folder, depth = 0, siblings = null, idx = 0, colId = nu
   group.className = depth === 0 ? 'folder-group' : 'subfolder-group';
 
   if (depth === 0) {
-    // Top-level: always-visible label, no toggle
+    // Top-level: always-visible label, no toggle. Whole group is draggable so
+    // it can be moved between columns or reordered within one.
+    group.dataset.fid = folder.id;
+
     const label = document.createElement('div');
     label.className = 'folder-label';
     label.textContent = folder.title;
@@ -247,6 +1076,9 @@ function makeFolderGroup(folder, depth = 0, siblings = null, idx = 0, colId = nu
     });
 
     group.appendChild(label);
+
+    group.appendChild(makeEditFolderRemove(folder.id));
+    attachTopLevelDragHandlers(group);
   } else {
     // Subfolder: collapsible header
     const isOpen = folderOpen[folder.id] ?? false;
@@ -307,7 +1139,7 @@ function makeFolderGroup(folder, depth = 0, siblings = null, idx = 0, colId = nu
         { label: isHidden(folder.id, colId) ? 'Show' : 'Hide', action: () => toggleHidden(folder.id, colId) },
         null,
         {
-          label: 'Delete', danger: true, action: async () => {
+          label: 'Delete', danger: true, confirm: true, action: async () => {
             await chrome.bookmarks.removeTree(folder.id);
             refresh();
           },
@@ -322,15 +1154,84 @@ function makeFolderGroup(folder, depth = 0, siblings = null, idx = 0, colId = nu
   return group;
 }
 
+
 function renderFolderContents(folder, container, depth, colId) {
   const children = folder.children ?? [];
+
+  // Container-level dragover/drop for reorder. The browser shows its default
+  // drag image (the bookmark element follows the cursor) and we render a
+  // horizontal accent-coloured line on the nearest sibling to indicate the
+  // drop position — same as macOS Finder / Safari bookmark reorder.
+  container.addEventListener('dragover', e => {
+    if (!draggedItem) return;
+    // Subfolders can only reorder within their original parent. Bookmarks
+    // can additionally move across folders.
+    const isBookmark = draggedItem.node.url != null;
+    if (!isBookmark && draggedItem.folderId !== folder.id) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+
+    clearDropIndicators(container);
+
+    const draggedEl = container.querySelector(`:scope > [data-id="${draggedItem.node.id}"]`);
+    const siblings = [...container.querySelectorAll(':scope > .bookmark-item, :scope > .subfolder-group')]
+      .filter(el => el !== draggedEl);
+    if (!siblings.length) return;
+
+    for (const sib of siblings) {
+      const rect = sib.getBoundingClientRect();
+      if (e.clientY < rect.top + rect.height / 2) {
+        sib.classList.add('drop-before');
+        pendingItemDrop = { container, folderId: folder.id };
+        return;
+      }
+    }
+    // Past last sibling — indicator on the bottom edge of the last one.
+    siblings[siblings.length - 1].classList.add('drop-after');
+    pendingItemDrop = { container, folderId: folder.id };
+  });
+
+  container.addEventListener('drop', async e => {
+    if (!draggedItem) return;
+    const isBookmark = draggedItem.node.url != null;
+    if (!isBookmark && draggedItem.folderId !== folder.id) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    const beforeEl = container.querySelector(':scope > .drop-before');
+    const afterEl  = container.querySelector(':scope > .drop-after');
+    clearDropIndicators(container);
+    if (!beforeEl && !afterEl) return;
+
+    const allSiblings = [...container.querySelectorAll(':scope > .bookmark-item, :scope > .subfolder-group')];
+    let targetIdx = beforeEl
+      ? allSiblings.indexOf(beforeEl)
+      : allSiblings.indexOf(afterEl) + 1;
+
+    // Same-folder drop-before adjustment: when the source is earlier in the
+    // list than the target, removing the source first shifts the target down
+    // by one. drop-after at the end does NOT need this adjustment — Chrome
+    // already treats `index >= length` as "append".
+    const draggedEl = container.querySelector(`:scope > [data-id="${draggedItem.node.id}"]`);
+    if (draggedEl && beforeEl) {
+      const draggedIdx = allSiblings.indexOf(draggedEl);
+      if (draggedIdx < targetIdx) targetIdx -= 1;
+    }
+
+    pendingItemDrop = null; // drop fired and is processing — no dragend fallback needed
+    await chrome.bookmarks.move(draggedItem.node.id, { parentId: folder.id, index: targetIdx });
+    refresh();
+  });
+
   children.forEach((child, idx) => {
     if (child.children != null) {
       if (!state.showHidden && isHidden(child.id, colId)) return;
       const group = makeFolderGroup(child, depth + 1, children, idx, colId);
       if (isHidden(child.id, colId)) group.classList.add('item-hidden');
 
-      // ── Subfolder drag to reorder (same system as bookmarks) ──
       group.draggable = true;
       group.dataset.id = child.id;
 
@@ -342,42 +1243,13 @@ function renderFolderContents(folder, container, depth, colId) {
         requestAnimationFrame(() => group.classList.add('dragging'));
       });
 
-      group.addEventListener('dragend', () => {
+      group.addEventListener('dragend', async () => {
+        // If the drop event didn't process (e.g. cursor moved at the last
+        // moment), commit the move from the indicator state we saved.
+        await flushPendingItemDrop();
         group.classList.remove('dragging');
         draggedItem = null;
-        clearDropIndicators(container);
-      });
-
-      group.addEventListener('dragover', e => {
-        if (!draggedItem || draggedItem.node.id === child.id) return;
-        if (draggedItem.folderId !== folder.id) return;
-        e.preventDefault();
-        e.stopPropagation();
-        e.dataTransfer.dropEffect = 'move';
-        clearDropIndicators(container);
-        const rect = group.getBoundingClientRect();
-        group.classList.add(e.clientY > rect.top + rect.height / 2 ? 'drop-after' : 'drop-before');
-      });
-
-      group.addEventListener('dragleave', () => group.classList.remove('drop-before', 'drop-after'));
-
-      group.addEventListener('drop', async e => {
-        e.preventDefault();
-        e.stopPropagation();
-        const isAfter = group.classList.contains('drop-after');
-        group.classList.remove('drop-before', 'drop-after');
-        if (!draggedItem || draggedItem.node.id === child.id) return;
-        if (draggedItem.folderId !== folder.id) return;
-
-        let targetIndex;
-        const draggedBefore = draggedItem.node.index < child.index;
-        if (isAfter) {
-          targetIndex = draggedBefore ? child.index : child.index + 1;
-        } else {
-          targetIndex = draggedBefore ? child.index - 1 : child.index;
-        }
-        await chrome.bookmarks.move(draggedItem.node.id, { parentId: folder.id, index: targetIndex });
-        refresh();
+        clearDropIndicators(document);
       });
 
       container.appendChild(group);
@@ -386,10 +1258,6 @@ function renderFolderContents(folder, container, depth, colId) {
       container.appendChild(makeBookmarkItem(child, folder, children, idx, colId));
     }
   });
-}
-
-function clearDropIndicators(container) {
-  container.querySelectorAll('.drop-before, .drop-after').forEach(el => el.classList.remove('drop-before', 'drop-after'));
 }
 
 function makeBookmarkItem(bm, folder, siblings, idx, colId) {
@@ -435,7 +1303,7 @@ function makeBookmarkItem(bm, folder, siblings, idx, colId) {
       { label: isHidden(bm.id, colId) ? 'Show' : 'Hide', action: () => toggleHidden(bm.id, colId) },
       null,
       {
-        label: 'Delete', danger: true, action: async () => {
+        label: 'Delete', danger: true, confirm: true, action: async () => {
           await chrome.bookmarks.remove(bm.id);
           refresh();
         },
@@ -443,7 +1311,7 @@ function makeBookmarkItem(bm, folder, siblings, idx, colId) {
     ]);
   });
 
-  // ── Drag to reorder ──
+  // ── Drag to reorder (positional logic in renderFolderContents container) ──
   a.addEventListener('dragstart', e => {
     e.stopPropagation(); // don't trigger folder-group drag
     draggedItem = { node: bm, folderId: folder.id };
@@ -452,41 +1320,11 @@ function makeBookmarkItem(bm, folder, siblings, idx, colId) {
     requestAnimationFrame(() => a.classList.add('dragging'));
   });
 
-  a.addEventListener('dragend', () => {
+  a.addEventListener('dragend', async () => {
+    await flushPendingItemDrop();
     a.classList.remove('dragging');
     draggedItem = null;
-    document.querySelectorAll('.drop-before, .drop-after').forEach(el => el.classList.remove('drop-before', 'drop-after'));
-  });
-
-  a.addEventListener('dragover', e => {
-    if (!draggedItem || draggedItem.node.id === bm.id) return;
-    e.preventDefault();
-    e.stopPropagation();
-    e.dataTransfer.dropEffect = 'move';
-    document.querySelectorAll('.drop-before, .drop-after').forEach(el => el.classList.remove('drop-before', 'drop-after'));
-    const rect = a.getBoundingClientRect();
-    a.classList.add(e.clientY > rect.top + rect.height / 2 ? 'drop-after' : 'drop-before');
-  });
-
-  a.addEventListener('dragleave', () => a.classList.remove('drop-before', 'drop-after'));
-
-  a.addEventListener('drop', async e => {
-    e.preventDefault();
-    e.stopPropagation();
-    const isAfter = a.classList.contains('drop-after');
-    a.classList.remove('drop-before', 'drop-after');
-    if (!draggedItem || draggedItem.node.id === bm.id) return;
-
-    let targetIndex;
-    const sameFolder = draggedItem.folderId === folder.id;
-    const draggedBefore = sameFolder && draggedItem.node.index < bm.index;
-    if (isAfter) {
-      targetIndex = draggedBefore ? bm.index : bm.index + 1;
-    } else {
-      targetIndex = draggedBefore ? bm.index - 1 : bm.index;
-    }
-    await chrome.bookmarks.move(draggedItem.node.id, { parentId: folder.id, index: targetIndex });
-    refresh();
+    clearDropIndicators(document);
   });
 
   return a;
@@ -511,6 +1349,53 @@ function showCtxMenu(x, y, items) {
       ctxMenu.appendChild(sep);
       return;
     }
+
+    // Items flagged `confirm: true` transform in place into an inline
+    // Yes / Cancel pair on click instead of firing immediately. Same pattern
+    // as the column-remove confirm in edit mode.
+    if (item.confirm) {
+      const wrap = document.createElement('div');
+      wrap.className = 'ctx-confirm-wrap';
+
+      const trigger = document.createElement('button');
+      trigger.className = 'ctx-item' + (item.danger ? ' danger' : '');
+      trigger.textContent = item.label;
+      trigger.disabled = item.disabled ?? false;
+
+      const row = document.createElement('div');
+      row.className = 'ctx-confirm';
+
+      const yes = document.createElement('button');
+      yes.className = 'ctx-confirm-yes' + (item.danger ? ' danger' : '');
+      yes.textContent = 'Yes';
+      yes.addEventListener('click', e => {
+        e.stopPropagation();
+        ctxMenu.classList.add('hidden');
+        item.action();
+      });
+
+      const cancel = document.createElement('button');
+      cancel.className = 'ctx-confirm-cancel';
+      cancel.textContent = 'Cancel';
+      cancel.addEventListener('click', e => {
+        e.stopPropagation();
+        wrap.classList.remove('confirming');
+      });
+
+      row.appendChild(yes);
+      row.appendChild(cancel);
+
+      trigger.addEventListener('click', e => {
+        e.stopPropagation();
+        wrap.classList.add('confirming');
+      });
+
+      wrap.appendChild(trigger);
+      wrap.appendChild(row);
+      ctxMenu.appendChild(wrap);
+      return;
+    }
+
     const btn = document.createElement('button');
     btn.className = 'ctx-item' + (item.danger ? ' danger' : '');
     btn.textContent = item.label;
@@ -625,6 +1510,37 @@ function makeHandle(leftColIdx) {
 function setupSettings() {
   document.getElementById('settings-toggle').addEventListener('click', openSettings);
   document.getElementById('settings-close').addEventListener('click', closeSettings);
+  document.getElementById('version-number').textContent = chrome.runtime.getManifest().version;
+
+  document.getElementById('exit-edit-mode').addEventListener('click', () => toggleEditMode(false));
+
+  // Esc closes the panel or exits edit mode (panel takes priority if both open).
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    const panel = document.getElementById('settings-panel');
+    if (!panel.classList.contains('hidden')) {
+      closeSettings();
+      return;
+    }
+    if (editMode) toggleEditMode(false);
+  });
+
+  // Outside click closes — `click` (not mousedown) so initiating a drag from
+  // outside the panel doesn't fire and close it mid-drag.
+  document.addEventListener('click', e => {
+    const panel = document.getElementById('settings-panel');
+    if (panel.classList.contains('hidden')) return;
+    if (panel.contains(e.target)) return;
+    if (e.target.closest('#settings-toggle')) return;
+    if (e.target.closest('.ctx-menu')) return;
+    closeSettings();
+  });
+}
+
+function toggleEditMode(on) {
+  editMode = on;
+  document.body.classList.toggle('edit-mode', editMode);
+  renderColumns();
 }
 
 function openSettings() {
@@ -634,6 +1550,9 @@ function openSettings() {
 
 function closeSettings() {
   document.getElementById('settings-panel').classList.add('hidden');
+  // Drop focus so the (transparent) settings-toggle doesn't keep its :focus
+  // outline visible after Esc/outside-click closes the panel.
+  document.getElementById('settings-toggle').blur();
 }
 
 function renderSettingsPanel() {
@@ -658,11 +1577,23 @@ function renderSettingsPanel() {
   };
 
   // Hide column handles
+  // "Column dividers" — checkbox semantics are "visible when checked", so we
+  // invert against the underlying `hideHandles` storage key for compatibility.
   const hideHandlesToggle = document.getElementById('hide-handles-toggle');
-  hideHandlesToggle.checked = state.hideHandles;
+  hideHandlesToggle.checked = !state.hideHandles;
   hideHandlesToggle.onchange = () => {
-    state.hideHandles = hideHandlesToggle.checked;
+    state.hideHandles = !hideHandlesToggle.checked;
     applyHideHandles(state.hideHandles);
+    persist();
+  };
+
+  // Hide folder title dividers
+  // "Folder title dividers" — same pattern as Column dividers above.
+  const hideFolderDividersToggle = document.getElementById('hide-folder-dividers-toggle');
+  hideFolderDividersToggle.checked = !state.hideFolderDividers;
+  hideFolderDividersToggle.onchange = () => {
+    state.hideFolderDividers = !hideFolderDividersToggle.checked;
+    applyHideFolderDividers(state.hideFolderDividers);
     persist();
   };
 
@@ -675,250 +1606,13 @@ function renderSettingsPanel() {
     refresh();
   };
 
-  renderColumnsConfig();
+  const editViewBtn = document.getElementById('edit-view-toggle');
+  editViewBtn.onclick = () => {
+    closeSettings();
+    toggleEditMode(true);
+  };
 }
 
-function renderColumnsConfig() {
-  const container = document.getElementById('columns-config');
-  container.innerHTML = '';
-
-  let dragSrcIdx = null;
-  let dragSrcFid = null;
-  let dragSrcFidColIdx = null;
-
-  state.columns.forEach((col, colIdx) => {
-    const card = document.createElement('div');
-    card.className = 'col-card';
-    card.draggable = true;
-    card.dataset.idx = colIdx;
-
-    // ── Drag events ──
-    card.addEventListener('dragstart', e => {
-      dragSrcIdx = colIdx;
-      e.dataTransfer.effectAllowed = 'move';
-      // slight delay so the card isn't ghosted in its dragging state
-      requestAnimationFrame(() => card.classList.add('dragging'));
-    });
-
-    card.addEventListener('dragend', () => {
-      card.classList.remove('dragging');
-      container.querySelectorAll('.col-card').forEach(c => c.classList.remove('drag-over'));
-      dragSrcIdx = null;
-    });
-
-    card.addEventListener('dragover', e => {
-      if (dragSrcIdx === null) return; // chip drag in progress, not a card drag
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      if (dragSrcIdx !== colIdx) {
-        container.querySelectorAll('.col-card').forEach(c => c.classList.remove('drag-over'));
-        card.classList.add('drag-over');
-      }
-    });
-
-    card.addEventListener('dragleave', () => {
-      card.classList.remove('drag-over');
-    });
-
-    card.addEventListener('drop', e => {
-      e.preventDefault();
-      card.classList.remove('drag-over');
-      if (dragSrcIdx === null || dragSrcIdx === colIdx) return;
-      // Reorder state.columns
-      const moved = state.columns.splice(dragSrcIdx, 1)[0];
-      state.columns.splice(colIdx, 0, moved);
-      persist();
-      renderColumns();
-      renderColumnsConfig();
-    });
-
-    // ── Header ──
-    const header = document.createElement('div');
-    header.className = 'col-card-header';
-
-    const left = document.createElement('div');
-    left.className = 'col-card-left';
-
-    const grip = document.createElement('span');
-    grip.className = 'drag-grip';
-    grip.textContent = '⠿';
-    grip.title = 'Drag to reorder';
-
-    const title = document.createElement('span');
-    title.className = 'col-card-title';
-    title.textContent = `Column ${colIdx + 1}`;
-
-    left.appendChild(grip);
-    left.appendChild(title);
-
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'btn-icon';
-    removeBtn.title = 'Remove column';
-    removeBtn.textContent = '×';
-    removeBtn.addEventListener('click', () => {
-      state.columns.splice(colIdx, 1);
-      persist();
-      renderColumns();
-      renderColumnsConfig();
-    });
-
-    header.appendChild(left);
-    header.appendChild(removeBtn);
-    card.appendChild(header);
-
-    // Folder chips
-    const chips = document.createElement('div');
-    chips.className = 'folder-chips';
-
-    col.folderIds.forEach(fid => {
-      const folder = folderById(fid);
-      if (!folder) return;
-
-      const chip = document.createElement('span');
-      chip.className = 'chip';
-      chip.draggable = true;
-
-      const name = document.createElement('span');
-      name.className = 'chip-name';
-      name.textContent = folder.title;
-
-      const x = document.createElement('button');
-      x.className = 'chip-remove';
-      x.textContent = '×';
-      x.title = 'Remove from column';
-      x.addEventListener('click', () => {
-        col.folderIds = col.folderIds.filter(id => id !== fid);
-        persist();
-        renderColumns();
-        renderColumnsConfig();
-      });
-
-      // ── Chip drag-to-reorder ──
-      chip.addEventListener('dragstart', e => {
-        e.stopPropagation(); // don't trigger card drag
-        dragSrcFid = fid;
-        dragSrcFidColIdx = colIdx;
-        e.dataTransfer.effectAllowed = 'move';
-
-        // Canvas-based drag image so rounded corners are truly transparent
-        const rect = chip.getBoundingClientRect();
-        const dpr  = devicePixelRatio;
-        const cvs  = document.createElement('canvas');
-        cvs.width  = rect.width  * dpr;
-        cvs.height = rect.height * dpr;
-        const ctx  = cvs.getContext('2d');
-        ctx.scale(dpr, dpr);
-        const cs = getComputedStyle(chip);
-        const r  = parseFloat(cs.borderRadius);
-        // draw rounded rect
-        ctx.beginPath();
-        ctx.roundRect(0, 0, rect.width, rect.height, r);
-        ctx.fillStyle = cs.backgroundColor;
-        ctx.fill();
-        // draw text
-        ctx.fillStyle = cs.color;
-        ctx.font = `${cs.fontSize} ${cs.fontFamily}`;
-        ctx.textBaseline = 'middle';
-        const pad = parseFloat(cs.paddingLeft);
-        ctx.fillText(chip.querySelector('.chip-name').textContent, pad, rect.height / 2);
-        // CSS size keeps drag image at 1x; canvas pixels give retina sharpness
-        cvs.style.cssText = `position:fixed;left:-9999px;width:${rect.width}px;height:${rect.height}px`;
-        document.body.appendChild(cvs);
-        e.dataTransfer.setDragImage(cvs, e.clientX - rect.left, e.clientY - rect.top);
-        requestAnimationFrame(() => { cvs.remove(); chip.classList.add('dragging'); });
-      });
-
-      chip.addEventListener('dragend', e => {
-        e.stopPropagation();
-        chip.classList.remove('dragging');
-        chips.querySelectorAll('.chip').forEach(c => c.classList.remove('drag-over'));
-        dragSrcFid = null;
-        dragSrcFidColIdx = null;
-      });
-
-      chip.addEventListener('dragover', e => {
-        if (dragSrcFid === null || dragSrcFid === fid || dragSrcFidColIdx !== colIdx) return;
-        e.preventDefault();
-        e.stopPropagation();
-        e.dataTransfer.dropEffect = 'move';
-        chips.querySelectorAll('.chip').forEach(c => c.classList.remove('drag-over'));
-        chip.classList.add('drag-over');
-      });
-
-      chip.addEventListener('dragleave', e => {
-        e.stopPropagation();
-        chip.classList.remove('drag-over');
-      });
-
-      chip.addEventListener('drop', e => {
-        e.preventDefault();
-        e.stopPropagation();
-        chip.classList.remove('drag-over');
-        if (dragSrcFid === null || dragSrcFid === fid || dragSrcFidColIdx !== colIdx) return;
-        const fromIdx = col.folderIds.indexOf(dragSrcFid);
-        const toIdx   = col.folderIds.indexOf(fid);
-        if (fromIdx === -1 || toIdx === -1) return;
-        col.folderIds.splice(fromIdx, 1);
-        col.folderIds.splice(toIdx, 0, dragSrcFid);
-        persist();
-        renderColumns();
-        renderColumnsConfig();
-      });
-
-      chip.appendChild(name);
-      chip.appendChild(x);
-      chips.appendChild(chip);
-    });
-
-    card.appendChild(chips);
-
-    // Add-folder dropdown — only show folders not already assigned
-    const assigned = new Set(state.columns.flatMap(c => c.folderIds));
-    const available = allFolders.filter(f => !assigned.has(f.id));
-
-    if (available.length) {
-      const sel = document.createElement('select');
-      sel.className = 'folder-select';
-
-      const placeholder = document.createElement('option');
-      placeholder.value = '';
-      placeholder.textContent = '+ Add folder…';
-      sel.appendChild(placeholder);
-
-      available.forEach(f => {
-        const opt = document.createElement('option');
-        opt.value = f.id;
-        // Show path hint if folder is nested (title only is often ambiguous)
-        opt.textContent = f.title;
-        sel.appendChild(opt);
-      });
-
-      sel.addEventListener('change', () => {
-        if (!sel.value) return;
-        col.folderIds.push(sel.value);
-        persist();
-        renderColumns();
-        renderColumnsConfig();
-      });
-
-      card.appendChild(sel);
-    }
-
-    container.appendChild(card);
-  });
-
-  // Add column button
-  const addBtn = document.getElementById('add-column');
-  // Replace onclick to avoid stale closures
-  const fresh = addBtn.cloneNode(true);
-  addBtn.replaceWith(fresh);
-  fresh.addEventListener('click', () => {
-    state.columns.push({ id: `col-${Date.now()}`, width: DEFAULT_WIDTH, folderIds: [] });
-    persist();
-    renderColumns();
-    renderColumnsConfig();
-  });
-}
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
@@ -952,9 +1646,20 @@ function applyHideHandles(on) {
   document.getElementById('columns-container').classList.toggle('hide-handles', on);
 }
 
+function applyHideFolderDividers(on) {
+  document.getElementById('columns-container').classList.toggle('hide-folder-dividers', on);
+}
+
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
 
 function persist() {
-  return chrome.storage.local.set({ theme: state.theme, dividers: state.dividers, hideHandles: state.hideHandles, showHidden: state.showHidden, columns: state.columns });
+  return chrome.storage.local.set({
+    theme: state.theme,
+    dividers: state.dividers,
+    hideHandles: state.hideHandles,
+    showHidden: state.showHidden,
+    hideFolderDividers: state.hideFolderDividers,
+    columns: state.columns,
+  });
 }

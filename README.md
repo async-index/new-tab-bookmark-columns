@@ -91,4 +91,4 @@ See `CHANGELOG.md` for the full release notes.
 
 ## License
 
-[MIT](LICENSE) © async_lab
+[MIT](LICENSE) © async

@@ -73,6 +73,35 @@ html, body {
   height: 100vh;
   overflow-x: auto;
   overflow-y: hidden;
+  /* Hidden by default; revealed only while scrolling (see .scrolling below).
+     Mirrors the thin, transparent-until-active look of the per-column
+     scrollbars. The container spans the whole viewport, so a hover trigger
+     (like the columns use) would keep it permanently visible — instead a
+     transient `.scrolling` class is toggled in JS on scroll. */
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+#columns-container.scrolling {
+  scrollbar-color: var(--handle-active) transparent;
+}
+
+#columns-container::-webkit-scrollbar {
+  height: 6px;
+}
+
+#columns-container::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#columns-container::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+  transition: background 0.15s;
+}
+
+#columns-container.scrolling::-webkit-scrollbar-thumb {
+  background: var(--handle-active);
 }
 
 .column {
@@ -470,10 +499,11 @@ html, body {
 
 #settings-toggle {
   position: fixed;
-  top: 14px;
-  right: 14px;
-  width: 30px;
-  height: 30px;
+  top: 10px;
+  right: 10px;
+  /* Even 6px padding around the 19×15 icon → a 31×27 rounded-rectangle hover
+     target (sized to the icon's aspect rather than a forced square). */
+  padding: 6px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -501,7 +531,7 @@ html, body {
   height: 100vh;
   background: var(--settings-bg);
   border-left: 1px solid var(--settings-border);
-  padding: 20px;
+  padding: 17px 20px 20px;
   overflow-y: auto;
   z-index: 200;
   transform: translateX(0);
@@ -533,20 +563,22 @@ html, body {
   font-weight: var(--weight-medium);
 }
 
+/* SF-Symbols-style xmark close — sits on the same level as the title (header is
+   centered). Thinness is controlled by the SVG's stroke-width. */
 #settings-close {
-  background: var(--hover);
-  border: none;
-  color: var(--text);
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 4px;
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 0 2px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s;
 }
 
 #settings-close:hover {
-  background: var(--hover);
   color: var(--text);
 }
 
@@ -815,8 +847,7 @@ html, body {
 .edit-col-grip,
 .edit-folder-remove,
 .edit-add-folder,
-.edit-add-column,
-.edit-exit-btn {
+.edit-actions {
   display: none;
 }
 
@@ -826,10 +857,12 @@ html, body {
 
 .edit-mode .edit-col-remove,
 .edit-mode .edit-col-grip,
-.edit-mode .edit-add-folder,
-.edit-mode .edit-add-column,
-.edit-mode .edit-exit-btn {
+.edit-mode .edit-add-folder {
   display: block;
+}
+
+.edit-mode .edit-actions {
+  display: flex;
 }
 
 /* Drag handle at the top of each column — initiates column reorder. */
@@ -962,23 +995,35 @@ html, body {
   color: var(--accent);
 }
 
-/* "+ Add column" button at the right end — top-aligned with the "Done editing"
-   button (top: 14px). */
-.edit-add-column {
+/* Action stack at the right end of the columns row: "+ Add column" on top,
+   "Done editing" stacked directly beneath it. Both buttons stretch to the same
+   width. Top-aligned with the column content (margin-top: 14px). */
+.edit-actions {
   flex-shrink: 0;
+  flex-direction: column;
   align-self: flex-start;
+  gap: 6px;   /* matches the gap between "+ Add item" and "× Remove column" */
   margin-top: 14px;
   margin-left: 14px;
+}
+
+/* Shared button shape for the two stacked actions. */
+.edit-add-column,
+.edit-exit-btn {
   padding: 6px 14px;
-  border: 1px dashed var(--border);
   border-radius: 5px;
-  background: none;
-  color: var(--text-muted);
   font-family: var(--font-family);
   font-size: var(--font-ui);
   cursor: pointer;
-  transition: border-color 0.15s, color 0.15s;
   white-space: nowrap;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+/* "+ Add column" — dashed, transparent ghost button. */
+.edit-add-column {
+  border: 1px dashed var(--border);
+  background: none;
+  color: var(--text-muted);
 }
 
 .edit-add-column:hover {
@@ -986,21 +1031,13 @@ html, body {
   color: var(--accent);
 }
 
-/* Floating "Done" button — top-right, in place of the settings icon. */
+/* "Done editing" — same shape as "+ Add column", but a solid filled button.
+   Fill + outline both use the theme-toggle track color (var(--border)); text
+   uses the toggle's unselected-option color (var(--text-muted)). */
 .edit-exit-btn {
-  position: fixed;
-  top: 14px;
-  right: 14px;
-  padding: 6px 14px;
-  background: var(--accent);
-  color: var(--accent-text);
-  border: none;
-  border-radius: 6px;
-  font-family: var(--font-family);
-  font-size: var(--font-ui);
-  cursor: pointer;
-  z-index: 150;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  border: 1px solid var(--border);
+  background: var(--border);
+  color: var(--text-muted);
 }
 
 .edit-exit-btn:hover {

@@ -384,6 +384,10 @@ function makeFolderIcon() {
 
 function renderColumns() {
   const container = document.getElementById('columns-container');
+  // Grab the "Done editing" button before clearing — after the first render it
+  // lives inside the container (in the edit-actions stack), so we re-home the
+  // same element each time to keep its click listener intact.
+  const exitBtn = document.getElementById('exit-edit-mode');
   container.innerHTML = '';
 
   state.columns.forEach((col, i) => {
@@ -398,7 +402,11 @@ function renderColumns() {
     container.appendChild(makeHandle(state.columns.length - 1));
   }
 
-  // Edit-mode "+ Add column" button (CSS-hidden unless body.edit-mode)
+  // Edit-mode action stack at the right end (CSS-hidden unless body.edit-mode):
+  // "+ Add column" on top, "Done editing" directly beneath it.
+  const actions = document.createElement('div');
+  actions.className = 'edit-actions';
+
   const addColBtn = document.createElement('button');
   addColBtn.className = 'edit-add-column';
   addColBtn.textContent = '+ Add column';
@@ -407,7 +415,9 @@ function renderColumns() {
     persist();
     renderColumns();
   });
-  container.appendChild(addColBtn);
+  actions.appendChild(addColBtn);
+  actions.appendChild(exitBtn);   // re-home the static "Done editing" button
+  container.appendChild(actions);
 
   if (state.columns.length > 0) {
     const spacer = document.createElement('div');
@@ -422,6 +432,16 @@ function renderColumns() {
 // number of column re-renders without reattachment.
 function setupContainerDragHandlers() {
   const container = document.getElementById('columns-container');
+
+  // Reveal the horizontal scrollbar only while actively scrolling, then fade it
+  // back out after a short idle — the bar spans the whole viewport, so a hover
+  // trigger would keep it permanently visible. See #columns-container.scrolling.
+  let scrollIdleTimer;
+  container.addEventListener('scroll', () => {
+    container.classList.add('scrolling');
+    clearTimeout(scrollIdleTimer);
+    scrollIdleTimer = setTimeout(() => container.classList.remove('scrolling'), 700);
+  });
 
   container.ondragover = e => {
     // Column reorder (edit-mode drag) — FLIP-animates the columns around the

@@ -2,7 +2,7 @@
 
 A Chrome extension that replaces the new tab page with a clean, customizable bookmark viewer organized in resizable columns.
 
-**Version 1.1.0** — submitted to the Chrome Web Store (in review).
+**Version 1.1.1** — bug-fix and UI polish release on top of 1.1.0 (submitted to the Chrome Web Store).
 
 ![New Tab Bookmark Columns](github-screenshot.png)
 
@@ -71,6 +71,7 @@ new-tab/
   newtab.css       — Design tokens, layout, component styles
   icons/           — Extension icons (16, 32, 48, 128 px PNGs)
   CHANGELOG.md     — Versioned changelog
+  releasing.md     — How to ship an update to the Chrome Web Store
   README.md        — This file
 ```
 
@@ -78,7 +79,7 @@ new-tab/
 
 ## Release status
 
-- [x] Version bumped to 1.1.0
+- [x] Version bumped to 1.1.1
 - [x] CHANGELOG written
 - [x] Manual smoke test pass
 - [x] Store screenshots (1280×800)
@@ -87,7 +88,8 @@ new-tab/
 - [x] Zip and upload
 - [x] Submitted for review
 
-See `CHANGELOG.md` for the full release notes.
+See `CHANGELOG.md` for the full release notes, and `releasing.md` for the
+update/release runbook.
 
 ## License
 

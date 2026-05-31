@@ -3,6 +3,17 @@
 All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.1.1] — 2026-05-31
+
+### Fixed
+- **Done editing** button could be hidden behind the **+ Add column** button once the columns overflowed the viewport — the floating top-right button is replaced by a stacked action group (**+ Add column** over **Done editing**) anchored at the end of the columns row, so they can never overlap at any scroll position.
+
+### Changed
+- Horizontal columns scrollbar is now hidden until you scroll (then fades out), matching the thin per-column scrollbars, instead of being permanently visible.
+- **Done editing** restyled to match the theme-toggle track (filled background, muted text, matching outline); its spacing from **+ Add column** now matches the in-column **+ Add item** / **× Remove column** gap.
+- Settings toggle icon uses a tighter margin and an even-padding rounded-rectangle hover target.
+- Settings panel close control is now a thin SF-Symbols-style ✕ in the header (replacing the duplicate sidebar glyph); panel top padding tightened slightly.
+
 ## [1.1.0] — 2026-05-29
 
 ### Added

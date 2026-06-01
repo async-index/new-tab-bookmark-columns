@@ -71,7 +71,6 @@ new-tab/
   newtab.css       — Design tokens, layout, component styles
   icons/           — Extension icons (16, 32, 48, 128 px PNGs)
   CHANGELOG.md     — Versioned changelog
-  releasing.md     — How to ship an update to the Chrome Web Store
   README.md        — This file
 ```
 
@@ -88,8 +87,7 @@ new-tab/
 - [x] Zip and upload
 - [x] Submitted for review
 
-See `CHANGELOG.md` for the full release notes, and `releasing.md` for the
-update/release runbook.
+See `CHANGELOG.md` for the full release notes.
 
 ## License
 

@@ -78,19 +78,9 @@ new-tab/
 
 ---
 
-## Release status
+## Releases
 
-Targeting **1.3.0** (submit after 1.2.0 clears review):
-
-- [x] Version bumped to 1.3.0
-- [x] Dev-test manifest `key` removed
-- [x] CHANGELOG written
-- [ ] Manual smoke test pass (incl. real two-device + dual-subtree account)
-- [ ] Store listing description updated for sync
-- [ ] Zip and upload
-- [ ] Submitted for review
-
-See `CHANGELOG.md` for the full release notes.
+See [CHANGELOG.md](CHANGELOG.md) for the full version history and release notes.
 
 ## License
 

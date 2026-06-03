@@ -56,24 +56,41 @@ let unresolvedRefs = new Map(); // marker -> reference object
 let unresolvedSeq = 0;
 let migratedOldFormat = false;  // set during hydrate when old node-id data was upgraded
 let lastPersistedLayout = null; // JSON of last write, to skip redundant persists
+// Optional, per-device cross-device sync (see sync-design.md §4.7). The layout
+// bundle (settings + columns) lives in chrome.storage.sync when the user opts
+// in, otherwise chrome.storage.local. faviconCache, folderOpen, hiddenIds, and
+// this flag itself are ALWAYS device-local (the flag must never sync, or it'd
+// propagate the choice to other devices). Default OFF.
+const SYNC_ENABLED_KEY = 'layoutSyncEnabled';
+let layoutSyncEnabled = false;
+function layoutStore() {
+  return layoutSyncEnabled && chrome.storage.sync ? chrome.storage.sync : chrome.storage.local;
+}
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', async () => {
-  const stored = await chrome.storage.local.get(['theme', 'dividers', 'hideHandles', 'showHidden', 'hideFolderDividers', 'columns', 'faviconCache', 'folderOpen', 'hiddenIds']);
+  // Device-local keys first — including the sync toggle, which decides where the
+  // layout bundle lives.
+  const local = await chrome.storage.local.get([SYNC_ENABLED_KEY, 'faviconCache', 'folderOpen', 'hiddenIds']);
+  layoutSyncEnabled = !!local[SYNC_ENABLED_KEY];
+  if (local.faviconCache)        faviconCache      = local.faviconCache;
+  if (local.folderOpen)          folderOpen        = local.folderOpen;
+  if (local.hiddenIds && !Array.isArray(local.hiddenIds)) {
+    for (const [colId, ids] of Object.entries(local.hiddenIds)) {
+      hiddenIds[colId] = new Set(ids);
+    }
+  }
+
+  // The layout bundle (settings + columns) from the active store (sync if the
+  // user opted in, otherwise local).
+  const stored = await layoutStore().get(['theme', 'dividers', 'hideHandles', 'showHidden', 'hideFolderDividers', 'columns', 'layoutSchema']);
   if (stored.theme)                       state.theme              = stored.theme;
   if (stored.dividers != null)            state.dividers           = stored.dividers;
   if (stored.hideHandles != null)         state.hideHandles        = stored.hideHandles;
   if (stored.showHidden != null)          state.showHidden         = stored.showHidden;
   if (stored.hideFolderDividers != null)  state.hideFolderDividers = stored.hideFolderDividers;
   if (stored.columns?.length)     state.columns     = stored.columns;
-  if (stored.faviconCache)        faviconCache      = stored.faviconCache;
-  if (stored.folderOpen)          folderOpen        = stored.folderOpen;
-  if (stored.hiddenIds && !Array.isArray(stored.hiddenIds)) {
-    for (const [colId, ids] of Object.entries(stored.hiddenIds)) {
-      hiddenIds[colId] = new Set(ids);
-    }
-  }
 
   applyTheme(state.theme);
   applyDividers(state.dividers);
@@ -109,6 +126,22 @@ document.addEventListener('DOMContentLoaded', async () => {
   chrome.bookmarks.onChanged.addListener(debouncedRefresh);
   chrome.bookmarks.onRemoved.addListener(debouncedRefresh);
   chrome.bookmarks.onMoved.addListener(debouncedRefresh);
+
+  // Cross-device sync: adopt a layout pushed from another device. Only acts when
+  // synced and the change is a genuine remote one (not the echo of our own
+  // write — guarded by comparing against our current serialized columns).
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (!layoutSyncEnabled || area !== 'sync' || !changes.columns) return;
+    const incoming = changes.columns.newValue;
+    if (JSON.stringify(incoming) === JSON.stringify(serializeColumns())) return; // our echo / already current
+    state.columns = hydrateColumns(incoming || []);
+    if (changes.theme)              { state.theme = changes.theme.newValue; applyTheme(state.theme); }
+    if (changes.dividers)           { state.dividers = changes.dividers.newValue; applyDividers(state.dividers); }
+    if (changes.hideHandles)        { state.hideHandles = changes.hideHandles.newValue; applyHideHandles(state.hideHandles); }
+    if (changes.showHidden)         { state.showHidden = changes.showHidden.newValue; }
+    if (changes.hideFolderDividers) { state.hideFolderDividers = changes.hideFolderDividers.newValue; applyHideFolderDividers(state.hideFolderDividers); }
+    renderColumns();
+  });
 });
 
 function debounce(fn, ms) {
@@ -2105,9 +2138,14 @@ function persist() {
     columns: serializeColumns(),   // node ids -> folder references
   };
   // Skip identical writes — avoids churn from refresh()-driven re-persists and
-  // keeps well under the future storage.sync write-rate limits.
+  // keeps well under the storage.sync write-rate limits.
   const sig = JSON.stringify(payload);
   if (sig === lastPersistedLayout) return Promise.resolve();
   lastPersistedLayout = sig;
-  return chrome.storage.local.set(payload);
+  return layoutStore().set(payload).catch(err => {
+    // e.g. storage.sync per-item / quota / rate limit. Don't lose the change:
+    // allow the next edit to retry, and the layout stays correct in memory.
+    console.warn('[layout] persist failed:', err?.message || err);
+    lastPersistedLayout = null;
+  });
 }

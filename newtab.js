@@ -56,7 +56,6 @@ let unresolvedRefs = new Map(); // marker -> reference object
 let unresolvedSeq = 0;
 let migratedOldFormat = false;  // set during hydrate when old node-id data was upgraded
 let lastPersistedLayout = null; // JSON of last write, to skip redundant persists
-let lastColIds = [];            // col ids last written, to remove stale col:* shards
 let migratedToSharded = false;  // set on load when a legacy single-`columns` key was read
 // Optional, per-device cross-device sync (see sync-design.md §4.7). The layout
 // bundle (settings + columns) lives in chrome.storage.sync when the user opts
@@ -86,9 +85,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // The layout bundle (settings + sharded columns) from the active store (sync
   // if the user opted in, otherwise local).
-  const { settings, rawColumns, legacy, colIds } = await readLayout(layoutStore());
+  const { settings, rawColumns, legacy } = await readLayout(layoutStore());
   Object.assign(state, settings);
-  lastColIds = colIds;
   migratedToSharded = legacy;
   state.columns = rawColumns; // raw refs; hydrated to live node ids after the tree loads
 
@@ -136,34 +134,38 @@ document.addEventListener('DOMContentLoaded', async () => {
     const columnsChanged = 'colOrder' in changes
       || Object.keys(changes).some(k => k.startsWith('col:'));
     if (!settingsChanged && !columnsChanged) return;
-    // Snapshot our current layout BEFORE reading/hydrating the incoming one
-    // (hydrateColumns resets the shared unresolved-ref map).
     const currentSer = JSON.stringify(serializeColumns());
-    const { settings, rawColumns, colIds } = await readLayout(chrome.storage.sync);
+    const { settings, rawColumns } = await readLayout(chrome.storage.sync);
+    let rendered = false;
     // Apply incoming settings live, independent of the column echo-guard below —
     // a pure settings change from another device still has columns unchanged.
-    if (settingsChanged) {
-      const hiddenChanged = 'showHidden' in changes;
+    // Skip when nothing actually differs from our state (our own write echoes
+    // back as a sync change — review #7).
+    const hiddenChanged = 'showHidden' in changes && settings.showHidden !== state.showHidden;
+    if (settingsChanged && SETTINGS_KEYS.some(k => k in changes && settings[k] !== state[k])) {
       Object.assign(state, settings);
       applyTheme(state.theme);
       applyDividers(state.dividers);
       applyHideHandles(state.hideHandles);
       applyHideFolderDividers(state.hideFolderDividers);
       syncSettingsControls();
-      // showHidden is applied at render time (not via a CSS class), so a remote
-      // change to it needs a re-render to actually show/hide the items.
-      if (hiddenChanged && !columnsChanged) renderColumns();
     }
     if (columnsChanged) {
-      const hydrated = hydrateColumns(rawColumns);
-      const incomingSer = JSON.stringify(hydrated.map(c =>
-        ({ id: c.id, width: c.width, folderIds: serializeFolderIds(c.folderIds) })));
-      lastColIds = colIds;
+      // Compare the stored refs directly — don't hydrateColumns just to diff, as
+      // that mutates the shared unresolved-ref map (review #9). Hydrate only when
+      // we actually adopt. rawColumns are already in serialized (ref) form.
+      const incomingSer = JSON.stringify((rawColumns || []).map(c =>
+        ({ id: c.id, width: c.width, folderIds: c.folderIds })));
       if (incomingSer !== currentSer) {     // not our own echo / already current
-        state.columns = hydrated;
+        state.columns = hydrateColumns(rawColumns);
         renderColumns();
+        rendered = true;
       }
     }
+    // showHidden is applied at render time (not via a CSS class), so a remote
+    // change to it needs a re-render — but only if the columns branch didn't
+    // already render (review #5).
+    if (hiddenChanged && !rendered) renderColumns();
   });
 });
 
@@ -238,12 +240,24 @@ const childrenFolders = id => allFolders.filter(f => f.parentId === id);
 // folder. In memory we still use live node ids; references exist only at the
 // persist/load boundary.
 
+// Folders sharing a parent and title, in stable cross-device order (bookmark
+// index). Used to disambiguate same-named siblings (review #10).
+function sameNamedSiblings(parentId, title) {
+  return childrenFolders(parentId)
+    .filter(c => (c.title || '') === title)
+    .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+}
+
 // Build a reference from a live folder node.
 function folderRef(node) {
   const path = [];
+  const idx = []; // position among same-named siblings per segment (0 when unique)
   let n = node;
   while (n && n.parentId && n.parentId !== '0') {
-    path.unshift(n.title || '');
+    const title = n.title || '';
+    const twins = sameNamedSiblings(n.parentId, title);
+    idx.unshift(twins.length > 1 ? Math.max(0, twins.findIndex(c => c.id === n.id)) : 0);
+    path.unshift(title);
     n = folderById(n.parentId);
   }
   const container = n; // the top-level container (parentId '0'), or null
@@ -252,6 +266,7 @@ function folderRef(node) {
     syncing: container?.syncing ?? null,    // true (account) | false (local) | null (old Chrome)
     rootId: container?.id ?? null,          // fallback when folderType is unavailable
     path,                                    // titles, container→folder; [] if node IS the container
+    idx,                                     // sibling index per path segment (same-named disambiguation)
   };
 }
 
@@ -263,15 +278,25 @@ function resolveRef(ref) {
   let container = null;
   if (ref.root) {
     const m = containers.filter(c => c.folderType === ref.root);
-    container = (ref.syncing == null ? null : m.find(c => c.syncing === ref.syncing)) || m[0] || null;
+    if (ref.syncing == null) {
+      container = m[0] || null;                       // old ref, no subtree info
+    } else {
+      // Prefer the exact subtree (account vs local). Only fall back to a lone
+      // container — when both subtrees exist, picking the wrong bar would bind
+      // to an unrelated same-named folder (review #3), so leave it unresolved.
+      container = m.find(c => c.syncing === ref.syncing) || (m.length === 1 ? m[0] : null);
+    }
   }
   if (!container && ref.rootId != null) container = containers.find(c => c.id === ref.rootId) || null;
   if (!container) return null;
   let node = container;
-  for (const title of ref.path) {
-    const kids = childrenFolders(node.id).filter(c => c.title === title);
+  for (let i = 0; i < ref.path.length; i++) {
+    const kids = sameNamedSiblings(node.id, ref.path[i]);
     if (!kids.length) return null;
-    node = kids[0]; // best-effort among same-named siblings (index hint: TODO)
+    // Use the stored sibling index when there's ambiguity; clamp for safety.
+    // Old refs without `idx` fall back to the first match.
+    const want = Array.isArray(ref.idx) ? (ref.idx[i] ?? 0) : 0;
+    node = kids[Math.min(want, kids.length - 1)];
   }
   return node.id;
 }
@@ -822,8 +847,15 @@ async function refresh() {
   rehydrateColumns(); // drop deleted folders; re-resolve markers that reappeared
   pruneHiddenIds();
   renderColumns();
-  persist();          // capture renames/moves into stored refs (no-op if unchanged)
+  // Capture renames/moves into stored refs (no-op if unchanged). Coalesced:
+  // bookmark events can arrive in bursts and fire on every synced device at
+  // once, so debounce the write to stay well under storage.sync's rate limits
+  // (review #4). Direct user edits (drag/resize/settings) still persist eagerly.
+  persistSoon();
 }
+
+// Debounced layout write for high-frequency, event-driven persists (refresh()).
+const persistSoon = debounce(() => persist(), 1000);
 
 // Drop hidden-ID entries that refer to deleted bookmarks/folders or removed
 // columns so storage doesn't accumulate stale data over time.
@@ -2196,14 +2228,14 @@ async function disableSync(reset) {
 
 // Re-read the layout bundle from the active store and re-render.
 async function reloadFromActiveStore() {
-  const { settings, rawColumns, colIds } = await readLayout(layoutStore());
+  const { settings, rawColumns } = await readLayout(layoutStore());
   Object.assign(state, settings);
-  lastColIds = colIds;
   applyTheme(state.theme);
   applyDividers(state.dividers);
   applyHideHandles(state.hideHandles);
   applyHideFolderDividers(state.hideFolderDividers);
   state.columns = hydrateColumns(rawColumns);
+  pruneHiddenIds(); // #8: adopt path must drop hidden-ids for now-absent columns
   lastPersistedLayout = null;
   renderColumns();
 }
@@ -2258,31 +2290,33 @@ async function writeLayout(store) {
   state.columns.forEach(c => {
     payload[`col:${c.id}`] = { width: c.width, folderIds: serializeFolderIds(c.folderIds) };
   });
+  // Read THIS store's existing column ids before overwriting so we remove only
+  // its own orphaned shards. (A single shared `lastColIds` would target the
+  // wrong store after a sync on/off switch, orphaning shards — see review #2.)
+  const prev = await store.get('colOrder').catch(() => ({}));
+  const prevIds = Array.isArray(prev.colOrder) ? prev.colOrder : [];
   await store.set(payload);
   // Drop shards for removed columns + the legacy single-key blob, if present.
-  const stale = lastColIds.filter(id => !payload.colOrder.includes(id)).map(id => `col:${id}`);
+  const stale = prevIds.filter(id => !payload.colOrder.includes(id)).map(id => `col:${id}`);
   stale.push('columns');
   await store.remove(stale).catch(() => {});
-  lastColIds = payload.colOrder.slice();
 }
 
 async function readLayout(store) {
   const head = await store.get([...SETTINGS_KEYS, 'colOrder', 'columns']);
   const settings = {};
   SETTINGS_KEYS.forEach(k => { if (head[k] != null) settings[k] = head[k]; });
-  let rawColumns = [], legacy = false, colIds = [];
+  let rawColumns = [], legacy = false;
   if (Array.isArray(head.colOrder)) {                       // sharded (schema 3)
     const cd = head.colOrder.length ? await store.get(head.colOrder.map(id => `col:${id}`)) : {};
     rawColumns = head.colOrder
       .map(id => { const c = cd[`col:${id}`]; return c ? { id, width: c.width, folderIds: c.folderIds } : null; })
       .filter(Boolean);
-    colIds = head.colOrder.slice();
   } else if (Array.isArray(head.columns)) {                 // legacy single key
     rawColumns = head.columns;
     legacy = true;
-    colIds = head.columns.map(c => c.id);
   }
-  return { settings, rawColumns, legacy, colIds };
+  return { settings, rawColumns, legacy };
 }
 
 function persist() {

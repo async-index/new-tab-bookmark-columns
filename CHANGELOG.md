@@ -3,6 +3,25 @@
 All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.0] — 2026-06-03
+
+### Added
+- **Drill-down "+ Add item" menu.** The flat dropdown is replaced by an iOS-Settings-style menu that lets you browse the whole bookmark tree — including nested subfolders at any depth — to add any folder to a column. Each folder with subfolders opens a page with a `‹ Back` header, an `Add <folder>` action, and its subfolders.
+- **Drag a subfolder onto a column** (edit mode) to add it there as a top-level item — the drag equivalent of "+ Add item".
+- **Move a bookmark or folder between folders across columns.** Folders can now be dragged from one open folder into another (a real bookmark-tree move), matching bookmarks; guarded against dropping a folder into its own descendant.
+- **Drop into an empty folder.** Empty folders are now valid drop targets, shown with the same horizontal indicator as reordering.
+- **Cmd/Ctrl+E** toggles column edit mode.
+- The **+ Add item** button reads **Cancel** while its menu is open.
+
+### Changed
+- The "+ Add item" menu lives inside its column and **scrolls with the column** instead of floating as a fixed overlay; a small spacer keeps it off the browser's bottom edge.
+- Top-level containers (Bookmarks bar, Other bookmarks) always appear as collapsible rows in the menu, regardless of what's already placed.
+
+### Fixed
+- Dragging a column to the last position threw an `insertBefore` error and aborted the reorder.
+- Cmd/Ctrl+E no longer fires while typing in a rename or search field.
+- Esc closes an open "+ Add item" menu without also exiting edit mode.
+
 ## [1.1.1] — 2026-05-31
 
 ### Fixed

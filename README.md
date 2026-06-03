@@ -2,7 +2,7 @@
 
 A Chrome extension that replaces the new tab page with a clean, customizable bookmark viewer organized in resizable columns.
 
-**Version 1.1.1** — bug-fix and UI polish release on top of 1.1.0 (submitted to the Chrome Web Store).
+**Version 1.2.0** — adds the drill-down "+ Add item" menu, cross-column drag of bookmarks/folders, and a Cmd/Ctrl+E shortcut.
 
 ![New Tab Bookmark Columns](github-screenshot.png)
 
@@ -11,8 +11,9 @@ A Chrome extension that replaces the new tab page with a clean, customizable boo
 ## Features
 
 - **Resizable columns** of bookmark folders, dragged via the dividers between columns
-- **Inline edit mode** for arranging columns and folders: per-column drag handle, `+ Add item` dropdown, `× Remove column`, and a floating **Done editing** button
-- **Drag-and-drop reordering** for bookmarks and subfolders inside a folder, with macOS Finder–style horizontal drop indicators
+- **Inline edit mode** for arranging columns and folders: per-column drag handle, `+ Add item` menu, `× Remove column`, and a **Done editing** button
+- **Drill-down `+ Add item` menu** — browse the whole bookmark tree (including nested subfolders, at any depth) to add any folder or widget to a column; scrolls with the column
+- **Drag-and-drop** for bookmarks and folders: reorder inside a folder, move between folders across columns, drop into empty folders, or drag a subfolder onto a column to add it — all with macOS Finder–style horizontal drop indicators
 - **Per-column hidden state** — hiding a folder in one column does not affect it in another
 - **Subfolders** display inline in their natural order, collapsible with persistent open/closed state
 - **Widgets** that share `col.folderIds` with regular folders:
@@ -23,7 +24,7 @@ A Chrome extension that replaces the new tab page with a clean, customizable boo
 - **Display settings** — toggle bookmark dividers, folder title dividers, column dividers, and hidden items
 - **Favicons** — apple-touch-icon → Chrome favicon fallback, domain-level cache, persisted in `chrome.storage.local`
 - **Inline confirmations** for destructive actions (delete folder, delete bookmark)
-- **Keyboard** — Esc closes the settings panel or exits edit mode
+- **Keyboard** — `Cmd/Ctrl+E` toggles edit mode; `Esc` closes the settings panel, the open `+ Add item` menu, or exits edit mode
 
 ---
 
@@ -78,14 +79,14 @@ new-tab/
 
 ## Release status
 
-- [x] Version bumped to 1.1.1
+- [x] Version bumped to 1.2.0
 - [x] CHANGELOG written
-- [x] Manual smoke test pass
+- [ ] Manual smoke test pass
 - [x] Store screenshots (1280×800)
 - [x] Store listing description
 - [x] Chrome Web Store Developer Dashboard registration
-- [x] Zip and upload
-- [x] Submitted for review
+- [ ] Zip and upload
+- [ ] Submitted for review
 
 See `CHANGELOG.md` for the full release notes.
 

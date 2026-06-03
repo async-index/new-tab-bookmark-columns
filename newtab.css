@@ -256,6 +256,23 @@ html, body {
 .subfolder-group.drop-after::after,
 .bookmark-item.drop-after::after { bottom: -1px; }
 
+/* "Drop here to add as an item" highlight — a subfolder dragged onto a column. */
+.column.col-drop-target {
+  background: var(--hover);
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+/* Drop indicator for an empty folder — the same horizontal accent line as the
+   bookmark/subfolder reorder indicators, since there's no child to anchor on. */
+.drop-line {
+  height: 2px;
+  margin: 1px 0;
+  background: var(--accent);
+  border-radius: 1px;
+  pointer-events: none;
+}
+
 .subfolder-header {
   display: flex;
   align-items: center;
@@ -961,11 +978,12 @@ html, body {
 /* Per-column "+ Add…" dropdown */
 .edit-add-folder {
   /* No top margin — the last folder-group's padding-bottom (22px) already
-     provides the spacer. */
+     provides the spacer. Positioning context for the dropdown below. */
   margin-top: 0;
+  position: relative;
 }
 
-.edit-add-folder select {
+.add-trigger {
   width: 100%;
   padding: 6px 8px;
   border: 1px dashed var(--border);
@@ -975,24 +993,143 @@ html, body {
   font-family: var(--font-family);
   font-size: var(--font-ui);
   text-align: center;
-  text-align-last: center;
   cursor: pointer;
-  appearance: none;
   transition: border-color 0.15s, color 0.15s;
 }
 
-.edit-add-folder select:hover {
+.add-trigger:hover,
+.add-trigger:focus-visible {
   border-color: var(--accent);
   color: var(--accent);
-}
-
-.edit-add-folder select:focus {
   outline: none;
 }
 
-.edit-add-folder select:focus-visible {
-  border-color: var(--accent);
-  color: var(--accent);
+/* Add-item menu — iOS-Settings-style drill-down. Lives inside the column,
+   absolutely positioned under the trigger, so it scrolls with the column. */
+.add-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  background: var(--settings-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
+  overflow: hidden;   /* clip the slide-in transition */
+}
+
+.add-page {
+  display: flex;
+  flex-direction: column;
+  /* No internal scroll — the menu extends the column and scrolls with it. */
+  padding: 4px;
+}
+
+/* Invisible spacer parked just below the menu so the column scrolls a little
+   past it (breathing room before the browser edge). */
+.add-scroll-pad {
+  position: absolute;
+  left: 0;
+  width: 1px;
+  height: 28px;
+  pointer-events: none;
+}
+
+/* Push/pop transition — a gentle slide + fade, no horizontal march. */
+@keyframes add-slide-right { from { transform: translateX(16px);  opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes add-slide-left  { from { transform: translateX(-16px); opacity: 0; } to { transform: none; opacity: 1; } }
+.add-page.slide-from-right { animation: add-slide-right 0.18s ease; }
+.add-page.slide-from-left  { animation: add-slide-left  0.18s ease; }
+
+@media (prefers-reduced-motion: reduce) {
+  .add-page.slide-from-right,
+  .add-page.slide-from-left { animation: none; }
+}
+
+/* Nav header (back button). Scrolls with the menu/column like the rest. */
+.add-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 2px 6px 6px;
+}
+
+.add-back {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  padding: 2px 4px;
+  border: none;
+  background: none;
+  font-family: var(--font-family);
+  font-size: var(--font-ui);
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.add-back:hover { color: var(--text); }
+
+.add-group-label {
+  padding: 5px 10px 3px;
+  font-size: var(--font-sm);
+  color: var(--text-muted);
+}
+
+.add-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: none;
+  text-align: left;
+  font-family: var(--font-family);
+  font-size: var(--font-base);
+  color: var(--text);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.add-item-strong { font-weight: var(--weight-medium); }
+
+.add-item-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.add-item:hover:not(:disabled) { background: var(--hover); }
+
+.add-item:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* SF-style chevron icons (back row + forward folder rows). */
+.add-chevron-icon {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+}
+
+.add-chevron {
+  margin-left: auto;
+  color: var(--text-muted);
+}
+
+.add-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 6px;
 }
 
 /* Action stack at the right end of the columns row: "+ Add column" on top,

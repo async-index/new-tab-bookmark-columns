@@ -44,6 +44,8 @@ let colDragId = null;
 let colDragSnapshot = null;   // [{colId, left, right, mid}]
 let colDragDropped = false;
 let ctxMenu = null;    // singleton context menu element
+let addMenuEl = null;     // open "+ Add item" flyout (portaled to body), or null
+let addMenuCleanup = null; // tears down the flyout's document listeners
 let folderOpen = {};   // { [folderId]: boolean } subfolder open state
 let searchQuery = '';  // session-only — persists across re-renders, not across reloads
 let editMode = false;  // session-only — column-view inline edit overlay
@@ -145,6 +147,20 @@ function folderById(id) {
   return allFolders.find(f => f.id === id);
 }
 
+// True when `folderId` is `ancestorId` itself or nested anywhere beneath it.
+// Used to forbid dropping a folder into its own subtree (chrome.bookmarks.move
+// rejects such cycles).
+function isDescendantOrSelf(folderId, ancestorId) {
+  let id = folderId;
+  while (id) {
+    if (id === ancestorId) return true;
+    const f = folderById(id);
+    if (!f) break;
+    id = f.parentId;
+  }
+  return false;
+}
+
 function makeFavicon(url) {
   let domain;
   try { domain = new URL(url).hostname; } catch { return null; }
@@ -210,9 +226,15 @@ function persistHiddenIds() {
 // back to identity. Using CSS transitions (vs. WAAPI cancel/re-animate) interrupts
 // in-flight motion smoothly when dragover fires repeatedly.
 // Clears the drop-position indicators inside a scope (Element or Document).
+// Also clears the column "add here" highlight document-wide, so entering any
+// in-folder reorder region drops a stale highlight left by a column hover.
 function clearDropIndicators(scope) {
   scope.querySelectorAll('.drop-before, .drop-after').forEach(el =>
     el.classList.remove('drop-before', 'drop-after')
+  );
+  scope.querySelectorAll('.drop-line').forEach(el => el.remove());
+  document.querySelectorAll('.col-drop-target').forEach(el =>
+    el.classList.remove('col-drop-target')
   );
 }
 
@@ -227,12 +249,13 @@ async function flushPendingItemDrop() {
 
   const beforeEl = cont.querySelector(':scope > .drop-before');
   const afterEl  = cont.querySelector(':scope > .drop-after');
-  if (!beforeEl && !afterEl) return;
+  const into     = !!cont.querySelector(':scope > .drop-line');
+  if (!beforeEl && !afterEl && !into) return;
 
   const allSiblings = [...cont.querySelectorAll(':scope > .bookmark-item, :scope > .subfolder-group')];
-  let targetIdx = beforeEl
-    ? allSiblings.indexOf(beforeEl)
-    : allSiblings.indexOf(afterEl) + 1;
+  let targetIdx = beforeEl ? allSiblings.indexOf(beforeEl)
+                : afterEl  ? allSiblings.indexOf(afterEl) + 1
+                : 0; // dropped into an empty folder
 
   const draggedEl = cont.querySelector(`:scope > [data-id="${draggedItem.node.id}"]`);
   if (draggedEl && beforeEl) {
@@ -380,9 +403,29 @@ function makeFolderIcon() {
   return svg;
 }
 
+// SF-Symbols-style stroked chevron (chevron.left / chevron.right). An SVG, not
+// a guillemet glyph, so it sizes to currentColor and flex-centers cleanly with
+// adjacent text.
+function makeChevron(direction) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 12 12');
+  svg.setAttribute('fill', 'none');
+  svg.classList.add('add-chevron-icon');
+
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', direction === 'left' ? 'M7.5 3 L4 6 L7.5 9' : 'M4.5 3 L8 6 L4.5 9');
+  path.setAttribute('stroke', 'currentColor');
+  path.setAttribute('stroke-width', '1.6');
+  path.setAttribute('stroke-linecap', 'round');
+  path.setAttribute('stroke-linejoin', 'round');
+  svg.appendChild(path);
+  return svg;
+}
+
 // ─── Render columns ───────────────────────────────────────────────────────────
 
 function renderColumns() {
+  closeAddMenu();
   const container = document.getElementById('columns-container');
   // Grab the "Done editing" button before clearing — after the first render it
   // lives inside the container (in the edit-actions stack), so we re-home the
@@ -460,10 +503,12 @@ function setupContainerDragHandlers() {
       if (!draggedCol) return;
       const currentNonDragged = [...container.querySelectorAll('.column')]
         .filter(c => c.dataset.colId !== colDragId);
-      // Anchor against the "+ Add column" button when inserting at the end so
-      // the dragged column doesn't slip past it.
+      // Anchor against the edit-actions stack (which holds "+ Add column") when
+      // inserting at the end. Must be a DIRECT child of the container — the
+      // button itself is nested inside .edit-actions, so insertBefore() against
+      // it would throw "not a child of this node".
       const refCol = currentNonDragged[idx]
-        || container.querySelector('.edit-add-column');
+        || container.querySelector(':scope > .edit-actions');
 
       // The handle immediately to the dragged column's right travels with it,
       // so reordering doesn't leave a doubled-up handle next to the previous
@@ -479,6 +524,22 @@ function setupContainerDragHandlers() {
         container.insertBefore(draggedCol, refCol);
         if (movingHandle) container.insertBefore(movingHandle, draggedCol.nextSibling);
       });
+      return;
+    }
+
+    // Edit mode only: a subfolder dragged out of its parent onto a column →
+    // offer to add it there as a top-level item (display only, like
+    // "+ Add item"). In regular view, folders/bookmarks keep their original
+    // drag-to-location behaviour (handled by the in-folder listeners below).
+    // dropEffect must be 'move' to match the subfolder's effectAllowed='move' —
+    // a mismatched 'copy' makes Chrome silently refuse the drop.
+    if (editMode && draggedItem && draggedItem.node.children != null) {
+      const colEl = e.target.closest('.column');
+      clearDropIndicators(document);
+      if (!colEl) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      colEl.classList.add('col-drop-target');
       return;
     }
 
@@ -521,6 +582,27 @@ function setupContainerDragHandlers() {
       commitColumnDragToState();
       return;
     }
+    // Edit mode only: subfolder dropped onto a column → add as a top-level item.
+    if (editMode && draggedItem && draggedItem.node.children != null) {
+      const colEl = e.target.closest('.column');
+      clearDropIndicators(document);
+      if (!colEl) return;
+      e.preventDefault();
+      const targetCol = state.columns.find(c => c.id === colEl.dataset.colId);
+      const fid = draggedItem.node.id;
+      draggedItem = null;
+      pendingItemDrop = null; // this drop is column-add, not an in-folder move
+      // Display only — never touches the bookmark tree. Keep a folder to at
+      // most one standalone column slot, matching the "+ Add item" menu.
+      if (targetCol && !targetCol.folderIds.includes(fid)) {
+        state.columns.forEach(c => { c.folderIds = c.folderIds.filter(id => id !== fid); });
+        targetCol.folderIds.push(fid);
+        persist();
+      }
+      renderColumns();
+      return;
+    }
+
     if (mainDragFid === null) return;
     e.preventDefault();
     mainDragDropped = true;
@@ -688,54 +770,187 @@ function makeEditAddFolderControl(col) {
   const wrap = document.createElement('div');
   wrap.className = 'edit-add-folder';
 
-  const assigned = new Set(state.columns.flatMap(c => c.folderIds));
-  const available = allFolders.filter(f => !assigned.has(f.id));
-  const availableWidgets = Object.keys(WIDGET_TITLES).filter(id => !assigned.has(id));
-
-  const sel = document.createElement('select');
-  const placeholder = document.createElement('option');
-  placeholder.value = '';
-  placeholder.textContent = '+ Add item';
-  // Stays as the closed-state label but is hidden + unselectable in the open
-  // dropdown list.
-  placeholder.selected = true;
-  placeholder.disabled = true;
-  placeholder.hidden = true;
-  sel.appendChild(placeholder);
-
-  if (availableWidgets.length) {
-    const wg = document.createElement('optgroup');
-    wg.label = 'Widgets';
-    availableWidgets.forEach(wid => {
-      const opt = document.createElement('option');
-      opt.value = wid;
-      opt.textContent = WIDGET_TITLES[wid];
-      wg.appendChild(opt);
-    });
-    sel.appendChild(wg);
-  }
-
-  if (available.length) {
-    const fg = availableWidgets.length ? document.createElement('optgroup') : sel;
-    if (fg !== sel) fg.label = 'Folders';
-    available.forEach(f => {
-      const opt = document.createElement('option');
-      opt.value = f.id;
-      opt.textContent = f.title;
-      fg.appendChild(opt);
-    });
-    if (fg !== sel) sel.appendChild(fg);
-  }
-
-  sel.addEventListener('change', () => {
-    if (!sel.value) return;
-    col.folderIds.push(sel.value);
-    persist();
-    renderColumns();
+  const trigger = document.createElement('button');
+  trigger.className = 'add-trigger';
+  trigger.textContent = '+ Add item';
+  trigger.addEventListener('click', e => {
+    e.stopPropagation();
+    // Clicking this column's own trigger toggles it closed; clicking a different
+    // column's trigger while one is open switches to it in a single click.
+    const mine = addMenuEl && wrap.contains(addMenuEl);
+    closeAddMenu();
+    if (!mine) openAddMenu(trigger, col);
   });
 
-  wrap.appendChild(sel);
+  wrap.appendChild(trigger);
   return wrap;
+}
+
+function closeAddMenu() {
+  if (addMenuCleanup) { addMenuCleanup(); addMenuCleanup = null; }
+  if (addMenuEl) { addMenuEl.remove(); addMenuEl = null; }
+}
+
+// The "+ Add item" menu: an iOS-Settings-style drill-down. The root lists
+// widgets + top-level folders; tapping a folder with subfolders pushes a new
+// page (‹ Back header + "Add <folder>" + its subfolders), recursing to any
+// depth. Lives inside the column (absolutely positioned under the trigger) so it
+// scrolls with the column rather than floating over it.
+function openAddMenu(trigger, col) {
+  closeAddMenu();
+
+  const el = (tag, cls) => { const e = document.createElement(tag); if (cls) e.className = cls; return e; };
+  const elText = (tag, cls, text) => { const e = el(tag, cls); e.textContent = text; return e; };
+
+  const assigned = new Set(state.columns.flatMap(c => c.folderIds));
+
+  // parentId → child folders (pre-order within each bucket, as allFolders is).
+  const childrenOf = new Map();
+  allFolders.forEach(f => {
+    if (!childrenOf.has(f.parentId)) childrenOf.set(f.parentId, []);
+    childrenOf.get(f.parentId).push(f);
+  });
+
+  // A folder is worth showing if it can be added (not already placed) or has a
+  // descendant that can — prunes fully-placed/empty branches.
+  const usefulCache = new Map();
+  function isUseful(f) {
+    if (usefulCache.has(f.id)) return usefulCache.get(f.id);
+    let useful = !assigned.has(f.id);
+    if (!useful) useful = (childrenOf.get(f.id) || []).some(isUseful);
+    usefulCache.set(f.id, useful);
+    return useful;
+  }
+  const usefulChildren = f => (childrenOf.get(f.id) || []).filter(isUseful);
+
+  const add = id => {
+    col.folderIds.push(id);
+    persist();
+    renderColumns(); // also closes the menu (renderColumns → closeAddMenu)
+  };
+
+  // Top-level containers (Bookmarks bar, Other bookmarks, …) appear as their own
+  // collapsed rows — a chevron to drill into, or a plain row if empty/leaf. No
+  // hoisting, so the menu's shape is predictable and a container is never shown
+  // pre-opened at the root.
+  const rootImplied = null;
+  const rootFolders = (childrenOf.get('0') || []).filter(isUseful);
+
+  const path = []; // stack of folder nodes; [] = root page
+
+  // A folder row: leaf adds on click, parent pushes a page (chevron affordance).
+  function folderRow(f) {
+    if (usefulChildren(f).length === 0) {
+      const btn = el('button', 'add-item');
+      btn.append(elText('span', 'add-item-name', f.title || 'Untitled'));
+      btn.addEventListener('click', e => { e.stopPropagation(); add(f.id); });
+      return btn;
+    }
+    const btn = el('button', 'add-item');
+    const chev = makeChevron('right');
+    chev.classList.add('add-chevron');
+    btn.append(elText('span', 'add-item-name', f.title || 'Untitled'), chev);
+    btn.addEventListener('click', e => { e.stopPropagation(); path.push(f); navigate('push'); });
+    return btn;
+  }
+
+  function buildPage() {
+    const page = el('div', 'add-page');
+    const cur = path[path.length - 1] || null;
+
+    // Only sub-pages get a header — just a back button. The current folder is
+    // named by its "Add … folder" row below, so no separate title line.
+    if (cur) {
+      const dest = path.length >= 2 ? path[path.length - 2].title
+                 : (rootImplied ? rootImplied.title : 'Back');
+      const nav = el('div', 'add-nav');
+      const back = el('button', 'add-back');
+      back.append(makeChevron('left'), document.createTextNode(dest || 'Back'));
+      back.addEventListener('click', e => { e.stopPropagation(); path.pop(); navigate('pop'); });
+      nav.append(back);
+      page.append(nav);
+    }
+
+    if (!cur) {
+      // Root page.
+      const widgets = Object.keys(WIDGET_TITLES).filter(id => !assigned.has(id));
+      if (widgets.length) {
+        page.append(elText('div', 'add-group-label', 'Widgets'));
+        widgets.forEach(wid => {
+          const btn = el('button', 'add-item');
+          btn.append(elText('span', 'add-item-name', WIDGET_TITLES[wid]));
+          btn.addEventListener('click', e => { e.stopPropagation(); add(wid); });
+          page.append(btn);
+        });
+      }
+      if (rootFolders.length) {
+        page.append(elText('div', 'add-group-label', 'Folders'));
+        if (rootImplied) {
+          const btn = el('button', 'add-item add-item-strong');
+          btn.disabled = assigned.has(rootImplied.id);
+          btn.append(elText('span', 'add-item-name', `Add ${rootImplied.title} folder`));
+          btn.addEventListener('click', e => { e.stopPropagation(); add(rootImplied.id); });
+          page.append(btn, el('div', 'add-sep'));
+        }
+        rootFolders.forEach(f => page.append(folderRow(f)));
+      }
+      if (!widgets.length && !rootFolders.length) {
+        page.append(elText('div', 'add-group-label', 'Nothing left to add'));
+      }
+    } else {
+      // Inside a folder.
+      const addSelf = el('button', 'add-item add-item-strong');
+      addSelf.disabled = assigned.has(cur.id);
+      addSelf.append(elText('span', 'add-item-name', `Add ${cur.title || 'Untitled'} folder`));
+      addSelf.addEventListener('click', e => { e.stopPropagation(); add(cur.id); });
+      page.append(addSelf, el('div', 'add-sep'));
+      usefulChildren(cur).forEach(f => page.append(folderRow(f)));
+    }
+
+    return page;
+  }
+
+  const menu = el('div', 'add-menu');
+  const stage = el('div', 'add-stage');
+  menu.appendChild(stage);
+
+  // The menu lives INSIDE the column, absolutely positioned just under the
+  // trigger, so it scrolls with the column instead of floating over it. A small
+  // absolute spacer parked just below the menu lets the column scroll a little
+  // past it, so the menu never sits flush against the browser edge.
+  const wrapper = trigger.closest('.edit-add-folder') || document.body;
+  const pad = el('div', 'add-scroll-pad');
+  const syncPad = () => { pad.style.top = `${menu.offsetTop + menu.offsetHeight}px`; };
+
+  function navigate(direction) {
+    const page = buildPage();
+    page.classList.add(direction === 'pop' ? 'slide-from-left' : 'slide-from-right');
+    stage.replaceChildren(page);
+    syncPad();
+  }
+
+  navigate('push'); // initial root render
+  wrapper.appendChild(menu);
+  wrapper.appendChild(pad);
+  syncPad();
+  trigger.textContent = 'Cancel';   // toggle affordance while the menu is open
+  // Reveal it if the trigger sits below the fold in a scrolled column.
+  menu.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+
+  const onDocClick = e => {
+    if (!menu.contains(e.target) && e.target !== trigger) closeAddMenu();
+  };
+  const onKey = e => { if (e.key === 'Escape') closeAddMenu(); };
+  document.addEventListener('click', onDocClick);
+  document.addEventListener('keydown', onKey);
+
+  addMenuEl = menu;
+  addMenuCleanup = () => {
+    document.removeEventListener('click', onDocClick);
+    document.removeEventListener('keydown', onKey);
+    pad.remove();
+    trigger.textContent = '+ Add item';
+  };
 }
 
 // Edit-mode "remove from column" × — visible only when body.edit-mode is on.
@@ -1184,10 +1399,14 @@ function renderFolderContents(folder, container, depth, colId) {
   // drop position — same as macOS Finder / Safari bookmark reorder.
   container.addEventListener('dragover', e => {
     if (!draggedItem) return;
-    // Subfolders can only reorder within their original parent. Bookmarks
-    // can additionally move across folders.
+    // Bookmarks move freely across folders. A subfolder can reorder within its
+    // own parent in any mode, and in regular view also move into a *different*
+    // folder (a real tree move) — but never into itself or its own descendant.
+    // In edit mode the cross-folder drag is reserved for adding the folder to a
+    // column, so it falls through to the column-level handler.
     const isBookmark = draggedItem.node.url != null;
-    if (!isBookmark && draggedItem.folderId !== folder.id) return;
+    if (!isBookmark && draggedItem.folderId !== folder.id &&
+        (editMode || isDescendantOrSelf(folder.id, draggedItem.node.id))) return;
 
     e.preventDefault();
     e.stopPropagation();
@@ -1198,7 +1417,15 @@ function renderFolderContents(folder, container, depth, colId) {
     const draggedEl = container.querySelector(`:scope > [data-id="${draggedItem.node.id}"]`);
     const siblings = [...container.querySelectorAll(':scope > .bookmark-item, :scope > .subfolder-group')]
       .filter(el => el !== draggedEl);
-    if (!siblings.length) return;
+    if (!siblings.length) {
+      // Empty folder — no sibling to anchor on. Show the same horizontal line
+      // inside the folder (the drop lands at index 0).
+      const line = document.createElement('div');
+      line.className = 'drop-line';
+      container.appendChild(line);
+      pendingItemDrop = { container, folderId: folder.id };
+      return;
+    }
 
     for (const sib of siblings) {
       const rect = sib.getBoundingClientRect();
@@ -1216,20 +1443,22 @@ function renderFolderContents(folder, container, depth, colId) {
   container.addEventListener('drop', async e => {
     if (!draggedItem) return;
     const isBookmark = draggedItem.node.url != null;
-    if (!isBookmark && draggedItem.folderId !== folder.id) return;
+    if (!isBookmark && draggedItem.folderId !== folder.id &&
+        (editMode || isDescendantOrSelf(folder.id, draggedItem.node.id))) return;
 
     e.preventDefault();
     e.stopPropagation();
 
     const beforeEl = container.querySelector(':scope > .drop-before');
     const afterEl  = container.querySelector(':scope > .drop-after');
+    const into     = !!container.querySelector(':scope > .drop-line');
     clearDropIndicators(container);
-    if (!beforeEl && !afterEl) return;
+    if (!beforeEl && !afterEl && !into) return;
 
     const allSiblings = [...container.querySelectorAll(':scope > .bookmark-item, :scope > .subfolder-group')];
-    let targetIdx = beforeEl
-      ? allSiblings.indexOf(beforeEl)
-      : allSiblings.indexOf(afterEl) + 1;
+    let targetIdx = beforeEl ? allSiblings.indexOf(beforeEl)
+                  : afterEl  ? allSiblings.indexOf(afterEl) + 1
+                  : 0; // dropped into an empty folder
 
     // Same-folder drop-before adjustment: when the source is earlier in the
     // list than the target, removing the source first shifts the target down
@@ -1537,12 +1766,26 @@ function setupSettings() {
   // Esc closes the panel or exits edit mode (panel takes priority if both open).
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
+    if (addMenuEl) return; // the open add-menu handles its own Escape
     const panel = document.getElementById('settings-panel');
     if (!panel.classList.contains('hidden')) {
       closeSettings();
       return;
     }
     if (editMode) toggleEditMode(false);
+  });
+
+  // Cmd/Ctrl+E toggles column edit mode — but not while typing (e.g. renaming a
+  // bookmark/folder), where it would re-render and discard the in-progress edit.
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey &&
+        (e.key === 'e' || e.key === 'E')) {
+      const t = e.target;
+      if (t && (t.matches?.('input, textarea, select') || t.isContentEditable)) return;
+      e.preventDefault();
+      if (!editMode) closeSettings();
+      toggleEditMode(!editMode);
+    }
   });
 
   // Outside click closes — `click` (not mousedown) so initiating a drag from

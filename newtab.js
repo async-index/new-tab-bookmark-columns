@@ -56,6 +56,8 @@ let unresolvedRefs = new Map(); // marker -> reference object
 let unresolvedSeq = 0;
 let migratedOldFormat = false;  // set during hydrate when old node-id data was upgraded
 let lastPersistedLayout = null; // JSON of last write, to skip redundant persists
+let lastColIds = [];            // col ids last written, to remove stale col:* shards
+let migratedToSharded = false;  // set on load when a legacy single-`columns` key was read
 // Optional, per-device cross-device sync (see sync-design.md §4.7). The layout
 // bundle (settings + columns) lives in chrome.storage.sync when the user opts
 // in, otherwise chrome.storage.local. faviconCache, folderOpen, hiddenIds, and
@@ -82,15 +84,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // The layout bundle (settings + columns) from the active store (sync if the
-  // user opted in, otherwise local).
-  const stored = await layoutStore().get(['theme', 'dividers', 'hideHandles', 'showHidden', 'hideFolderDividers', 'columns', 'layoutSchema']);
-  if (stored.theme)                       state.theme              = stored.theme;
-  if (stored.dividers != null)            state.dividers           = stored.dividers;
-  if (stored.hideHandles != null)         state.hideHandles        = stored.hideHandles;
-  if (stored.showHidden != null)          state.showHidden         = stored.showHidden;
-  if (stored.hideFolderDividers != null)  state.hideFolderDividers = stored.hideFolderDividers;
-  if (stored.columns?.length)     state.columns     = stored.columns;
+  // The layout bundle (settings + sharded columns) from the active store (sync
+  // if the user opted in, otherwise local).
+  const { settings, rawColumns, legacy, colIds } = await readLayout(layoutStore());
+  Object.assign(state, settings);
+  lastColIds = colIds;
+  migratedToSharded = legacy;
+  state.columns = rawColumns; // raw refs; hydrated to live node ids after the tree loads
 
   applyTheme(state.theme);
   applyDividers(state.dividers);
@@ -106,7 +106,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // bookmark tree is loaded. Old node-id-based layouts are upgraded in place.
   if (state.columns.length) {
     state.columns = hydrateColumns(state.columns);
-    if (migratedOldFormat) persist(); // re-save in the reference format
+    if (migratedOldFormat || migratedToSharded) persist(); // upgrade to sharded refs
   }
 
   if (!state.columns.length) {
@@ -130,16 +130,26 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Cross-device sync: adopt a layout pushed from another device. Only acts when
   // synced and the change is a genuine remote one (not the echo of our own
   // write — guarded by comparing against our current serialized columns).
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (!layoutSyncEnabled || area !== 'sync' || !changes.columns) return;
-    const incoming = changes.columns.newValue;
-    if (JSON.stringify(incoming) === JSON.stringify(serializeColumns())) return; // our echo / already current
-    state.columns = hydrateColumns(incoming || []);
-    if (changes.theme)              { state.theme = changes.theme.newValue; applyTheme(state.theme); }
-    if (changes.dividers)           { state.dividers = changes.dividers.newValue; applyDividers(state.dividers); }
-    if (changes.hideHandles)        { state.hideHandles = changes.hideHandles.newValue; applyHideHandles(state.hideHandles); }
-    if (changes.showHidden)         { state.showHidden = changes.showHidden.newValue; }
-    if (changes.hideFolderDividers) { state.hideFolderDividers = changes.hideFolderDividers.newValue; applyHideFolderDividers(state.hideFolderDividers); }
+  chrome.storage.onChanged.addListener(async (changes, area) => {
+    if (!layoutSyncEnabled || area !== 'sync') return;
+    const relevant = 'colOrder' in changes || SETTINGS_KEYS.some(k => k in changes)
+      || Object.keys(changes).some(k => k.startsWith('col:'));
+    if (!relevant) return;
+    // Snapshot our current layout BEFORE reading/hydrating the incoming one
+    // (hydrateColumns resets the shared unresolved-ref map).
+    const currentSer = JSON.stringify(serializeColumns());
+    const { settings, rawColumns, colIds } = await readLayout(chrome.storage.sync);
+    const hydrated = hydrateColumns(rawColumns);
+    const incomingSer = JSON.stringify(hydrated.map(c =>
+      ({ id: c.id, width: c.width, folderIds: serializeFolderIds(c.folderIds) })));
+    lastColIds = colIds;
+    if (incomingSer === currentSer) return;     // our own echo / already current
+    Object.assign(state, settings);
+    applyTheme(state.theme);
+    applyDividers(state.dividers);
+    applyHideHandles(state.hideHandles);
+    applyHideFolderDividers(state.hideFolderDividers);
+    state.columns = hydrated;
     renderColumns();
   });
 });
@@ -304,11 +314,14 @@ function serializeItem(item) {
   return node ? folderRef(node) : null;                     // folder gone -> dropped
 }
 
+const SETTINGS_KEYS = ['theme', 'dividers', 'hideHandles', 'showHidden', 'hideFolderDividers'];
+const serializeFolderIds = folderIds => folderIds.map(serializeItem).filter(x => x != null);
+
 function serializeColumns() {
   return state.columns.map(col => ({
     id: col.id,
     width: col.width,
-    folderIds: col.folderIds.map(serializeItem).filter(x => x != null),
+    folderIds: serializeFolderIds(col.folderIds),
   }));
 }
 
@@ -2125,14 +2138,14 @@ async function enableSync() {
   layoutSyncEnabled = true; // active store is now sync
   await chrome.storage.local.set({ [SYNC_ENABLED_KEY]: true });
 
-  const cloud = await chrome.storage.sync.get(['columns']);
+  const { rawColumns: cloudCols } = await readLayout(chrome.storage.sync);
   const localCols = serializeColumns(); // this device's layout (pre-adopt)
-  if (!cloud.columns || !cloud.columns.length) {
+  if (!cloudCols.length) {
     // Cloud empty → this device seeds the shared baseline.
     lastPersistedLayout = null;
     await persist();
     preSyncColumns = null;
-  } else if (JSON.stringify(cloud.columns) === JSON.stringify(localCols)) {
+  } else if (JSON.stringify(cloudCols) === JSON.stringify(localCols)) {
     preSyncColumns = null; // identical — just switched stores
   } else {
     // Differing layouts → adopt the synced one by default (never overwrite the
@@ -2152,13 +2165,14 @@ async function disableSync() {
 
 // Re-read the layout bundle from the active store and re-render.
 async function reloadFromActiveStore() {
-  const b = await layoutStore().get(['theme', 'dividers', 'hideHandles', 'showHidden', 'hideFolderDividers', 'columns']);
-  if (b.theme)                    { state.theme = b.theme; applyTheme(state.theme); }
-  if (b.dividers != null)         { state.dividers = b.dividers; applyDividers(state.dividers); }
-  if (b.hideHandles != null)      { state.hideHandles = b.hideHandles; applyHideHandles(state.hideHandles); }
-  if (b.showHidden != null)         state.showHidden = b.showHidden;
-  if (b.hideFolderDividers != null) { state.hideFolderDividers = b.hideFolderDividers; applyHideFolderDividers(state.hideFolderDividers); }
-  state.columns = hydrateColumns(b.columns || []);
+  const { settings, rawColumns, colIds } = await readLayout(layoutStore());
+  Object.assign(state, settings);
+  lastColIds = colIds;
+  applyTheme(state.theme);
+  applyDividers(state.dividers);
+  applyHideHandles(state.hideHandles);
+  applyHideFolderDividers(state.hideFolderDividers);
+  state.columns = hydrateColumns(rawColumns);
   lastPersistedLayout = null;
   renderColumns();
 }
@@ -2203,24 +2217,52 @@ function applyHideFolderDividers(on) {
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
 
+// The layout is sharded across keys so no single key approaches storage.sync's
+// 8 KB/item limit: settings keys + `colOrder` (column id list) + one `col:<id>`
+// per column. Used for both stores (harmless in local). readLayout also reads
+// the legacy single-`columns` key so pre-3 layouts migrate to shards on load.
+async function writeLayout(store) {
+  const payload = { layoutSchema: 3, colOrder: state.columns.map(c => c.id) };
+  SETTINGS_KEYS.forEach(k => { payload[k] = state[k]; });
+  state.columns.forEach(c => {
+    payload[`col:${c.id}`] = { width: c.width, folderIds: serializeFolderIds(c.folderIds) };
+  });
+  await store.set(payload);
+  // Drop shards for removed columns + the legacy single-key blob, if present.
+  const stale = lastColIds.filter(id => !payload.colOrder.includes(id)).map(id => `col:${id}`);
+  stale.push('columns');
+  await store.remove(stale).catch(() => {});
+  lastColIds = payload.colOrder.slice();
+}
+
+async function readLayout(store) {
+  const head = await store.get([...SETTINGS_KEYS, 'colOrder', 'columns']);
+  const settings = {};
+  SETTINGS_KEYS.forEach(k => { if (head[k] != null) settings[k] = head[k]; });
+  let rawColumns = [], legacy = false, colIds = [];
+  if (Array.isArray(head.colOrder)) {                       // sharded (schema 3)
+    const cd = head.colOrder.length ? await store.get(head.colOrder.map(id => `col:${id}`)) : {};
+    rawColumns = head.colOrder
+      .map(id => { const c = cd[`col:${id}`]; return c ? { id, width: c.width, folderIds: c.folderIds } : null; })
+      .filter(Boolean);
+    colIds = head.colOrder.slice();
+  } else if (Array.isArray(head.columns)) {                 // legacy single key
+    rawColumns = head.columns;
+    legacy = true;
+    colIds = head.columns.map(c => c.id);
+  }
+  return { settings, rawColumns, legacy, colIds };
+}
+
 function persist() {
-  const payload = {
-    theme: state.theme,
-    dividers: state.dividers,
-    hideHandles: state.hideHandles,
-    showHidden: state.showHidden,
-    hideFolderDividers: state.hideFolderDividers,
-    layoutSchema: 2,
-    columns: serializeColumns(),   // node ids -> folder references
-  };
-  // Skip identical writes — avoids churn from refresh()-driven re-persists and
-  // keeps well under the storage.sync write-rate limits.
-  const sig = JSON.stringify(payload);
+  // Format-independent signature, so identical layouts skip the write (avoids
+  // churn from refresh() re-persists and respects sync's write-rate limits).
+  const sig = JSON.stringify({ s: SETTINGS_KEYS.map(k => state[k]), c: serializeColumns() });
   if (sig === lastPersistedLayout) return Promise.resolve();
   lastPersistedLayout = sig;
-  return layoutStore().set(payload).catch(err => {
+  return writeLayout(layoutStore()).catch(err => {
     // e.g. storage.sync per-item / quota / rate limit. Don't lose the change:
-    // allow the next edit to retry, and the layout stays correct in memory.
+    // allow the next edit to retry; the layout stays correct in memory.
     console.warn('[layout] persist failed:', err?.message || err);
     lastPersistedLayout = null;
   });

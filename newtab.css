@@ -732,19 +732,13 @@ html, body {
   width: 15px;
   height: 15px;
   flex: 0 0 auto;
-  border: 1px solid var(--text-muted);
-  border-radius: 50%;
-  font-size: 10px;
-  font-style: italic;
-  font-weight: var(--weight-medium);
-  line-height: 1;
   color: var(--text-muted);
   cursor: help;
 }
+.info-glyph svg { display: block; }
 .info-glyph:hover,
 .info-glyph:focus-visible {
   color: var(--text);
-  border-color: var(--text);
   outline: none;
 }
 .info-tip {

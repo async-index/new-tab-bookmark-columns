@@ -81,12 +81,12 @@ new-tab/
 
 - [x] Version bumped to 1.2.0
 - [x] CHANGELOG written
-- [ ] Manual smoke test pass
+- [x] Manual smoke test pass
 - [x] Store screenshots (1280×800)
 - [x] Store listing description
 - [x] Chrome Web Store Developer Dashboard registration
-- [ ] Zip and upload
-- [ ] Submitted for review
+- [x] Zip and upload
+- [x] Submitted for review
 
 See `CHANGELOG.md` for the full release notes.
 

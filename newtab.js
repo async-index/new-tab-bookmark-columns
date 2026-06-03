@@ -143,12 +143,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Apply incoming settings live, independent of the column echo-guard below —
     // a pure settings change from another device still has columns unchanged.
     if (settingsChanged) {
+      const hiddenChanged = 'showHidden' in changes;
       Object.assign(state, settings);
       applyTheme(state.theme);
       applyDividers(state.dividers);
       applyHideHandles(state.hideHandles);
       applyHideFolderDividers(state.hideFolderDividers);
       syncSettingsControls();
+      // showHidden is applied at render time (not via a CSS class), so a remote
+      // change to it needs a re-render to actually show/hide the items.
+      if (hiddenChanged && !columnsChanged) renderColumns();
     }
     if (columnsChanged) {
       const hydrated = hydrateColumns(rawColumns);

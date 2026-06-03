@@ -733,7 +733,7 @@ html, body {
   height: 15px;
   flex: 0 0 auto;
   color: var(--text-muted);
-  cursor: help;
+  cursor: default;
 }
 .info-glyph svg { display: block; }
 .info-glyph:hover,

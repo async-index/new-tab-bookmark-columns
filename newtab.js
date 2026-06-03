@@ -2102,13 +2102,17 @@ function renderSettingsPanel() {
   // Optional cross-device layout sync — per-device, opt-in (see sync-design.md).
   const syncToggle = document.getElementById('sync-toggle');
   syncToggle.checked = layoutSyncEnabled;
-  applySyncHint();
   syncToggle.onchange = async () => {
     document.getElementById('sync-conflict').classList.add('hidden');
     if (syncToggle.checked) await enableSync();
     else                    await disableSync();
-    applySyncHint();
   };
+  // The ⓘ glyph shows its description on hover/focus; clicking it must not
+  // toggle the label-wrapped checkbox.
+  document.getElementById('sync-info')?.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
   document.getElementById('sync-use-local').onclick = () => {
     // Override the adopted synced layout with this device's — push it up.
     document.getElementById('sync-conflict').classList.add('hidden');
@@ -2118,14 +2122,6 @@ function renderSettingsPanel() {
     persist();        // overwrite the cloud copy with this device's layout
     renderColumns();
   };
-}
-
-function applySyncHint() {
-  const hint = document.getElementById('sync-hint');
-  if (!hint) return;
-  hint.textContent = layoutSyncEnabled
-    ? 'Synced. This layout is shared with your other synced devices — any change you make here updates them too. Turning sync off keeps this layout on this device only; your other devices stay synced.'
-    : 'Not synced. This layout is saved on this device only. Turn on to share one layout across the devices where you enable it.';
 }
 
 // This device's layout captured at enable time, so the "use this device's

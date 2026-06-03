@@ -70,14 +70,18 @@
     <div class="settings-section">
       <h3>Columns</h3>
       <button id="edit-view-toggle" class="btn-secondary">Edit columns</button>
-      <label class="toggle-row" style="margin-top: 14px;">
+    </div>
+
+    <div class="settings-section">
+      <h3>Sync</h3>
+      <label class="toggle-row">
         <span class="toggle">
           <input type="checkbox" id="sync-toggle">
           <span class="toggle-slider"></span>
         </span>
-        Sync layout across devices
+        Sync Column Layout
+        <span class="info-glyph" id="sync-info" tabindex="0" role="img" aria-label="About Sync Column Layout">i<span class="info-tip">Shares your column layout across devices where you turn this on, using your Google account. Edits on any synced device update them all. Turning it off keeps the current layout on this device only — your other devices stay synced.</span></span>
       </label>
-      <div id="sync-hint" class="settings-hint"></div>
       <div id="sync-conflict" class="sync-conflict hidden">
         <span class="sync-conflict-msg">Now using your synced layout on this device.</span>
         <button id="sync-use-local" class="btn-secondary">Replace synced layout with this device’s</button>

@@ -80,8 +80,16 @@
           <span class="toggle-slider"></span>
         </span>
         Sync layout &amp; settings
-        <span class="info-glyph" id="sync-info" tabindex="0" role="img" aria-label="About syncing layout and settings">i<span class="info-tip">Shares your column layout and settings (theme, dividers, hidden items) across devices where you turn this on, using your Google account. Edits on any synced device update them all. Turning it off keeps the current layout and settings on this device only — your other devices stay synced.</span></span>
+        <span class="info-glyph" id="sync-info" tabindex="0" role="img" aria-label="About syncing layout and settings">i<span class="info-tip">Shares your column layout and settings (theme, dividers, hidden items) across devices where you turn this on, using your Google account. Edits on any synced device update them all. Turning it off lets you keep the current layout on this device or reset it to default — either way, your other devices stay synced.</span></span>
       </label>
+      <div id="sync-off-confirm" class="sync-confirm hidden">
+        <span class="sync-confirm-msg">Turn off sync on this device? Your other devices stay synced.</span>
+        <div class="sync-confirm-actions">
+          <button id="sync-off-keep" class="btn-secondary">Keep current layout here</button>
+          <button id="sync-off-reset" class="btn-secondary danger">Reset columns to default</button>
+          <button id="sync-off-cancel" class="btn-secondary">Cancel</button>
+        </div>
+      </div>
     </div>
 
     <div id="settings-footer">New Tab — Version <span id="version-number"></span></div>

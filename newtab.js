@@ -2124,10 +2124,30 @@ function renderSettingsPanel() {
 
   // Optional cross-device layout sync — per-device, opt-in (see sync-design.md).
   const syncToggle = document.getElementById('sync-toggle');
+  const syncOffConfirm = document.getElementById('sync-off-confirm');
   syncToggle.checked = layoutSyncEnabled;
+  syncOffConfirm.classList.add('hidden'); // start collapsed each time the panel opens
   syncToggle.onchange = async () => {
-    if (syncToggle.checked) await enableSync();
-    else                    await disableSync();
+    if (syncToggle.checked) {
+      syncOffConfirm.classList.add('hidden');
+      await enableSync();
+    } else {
+      // Don't disable yet — let the user choose what happens to this device's
+      // layout (keep it, or reset to default). Cancel re-enables the toggle.
+      syncOffConfirm.classList.remove('hidden');
+    }
+  };
+  document.getElementById('sync-off-keep').onclick = async () => {
+    syncOffConfirm.classList.add('hidden');
+    await disableSync(false);
+  };
+  document.getElementById('sync-off-reset').onclick = async () => {
+    syncOffConfirm.classList.add('hidden');
+    await disableSync(true);
+  };
+  document.getElementById('sync-off-cancel').onclick = () => {
+    syncOffConfirm.classList.add('hidden');
+    syncToggle.checked = true; // stay synced
   };
   // The ⓘ glyph shows its description on hover/focus; clicking it must not
   // toggle the label-wrapped checkbox.
@@ -2155,11 +2175,19 @@ async function enableSync() {
   }
 }
 
-async function disableSync() {
+async function disableSync(reset) {
   layoutSyncEnabled = false; // active store is now local again
   await chrome.storage.local.set({ [SYNC_ENABLED_KEY]: false });
+  if (reset) {
+    // Reset this device's columns to the first-install default. Only this device
+    // is affected — the cloud copy is left intact, so synced devices keep theirs.
+    const tree = await chrome.bookmarks.getTree();
+    state.columns = defaultColumns(tree[0]);
+    pruneHiddenIds();
+    renderColumns();
+  }
   lastPersistedLayout = null;
-  await persist(); // snapshot the current layout to local; cloud left for others
+  await persist(); // snapshot the (kept or reset) layout to local; cloud left for others
 }
 
 // Re-read the layout bundle from the active store and re-render.

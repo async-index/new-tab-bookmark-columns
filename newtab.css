@@ -775,6 +775,25 @@ html, body {
   visibility: visible;
 }
 
+/* Inline "turn off sync" confirmation: keep this device's layout or reset it. */
+.sync-confirm {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--hover);
+}
+.sync-confirm.hidden { display: none; }
+.sync-confirm-msg {
+  display: block;
+  margin-bottom: 8px;
+  font-size: var(--font-sm);
+  color: var(--text);
+}
+.sync-confirm-actions { display: flex; flex-direction: column; gap: 6px; }
+.btn-secondary.danger { color: #d44; }
+.btn-secondary.danger:hover { border-color: #d44; color: #d44; }
+
 /* ── Bookmark drag & edit ───────────────────────────────────────────────────── */
 
 .item-hidden {

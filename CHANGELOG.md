@@ -3,6 +3,19 @@
 All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.3.0] — 2026-06-03
+
+### Added
+- **Cross-device layout & settings sync (opt-in).** A new **Sync** section in Settings with a **Sync layout & settings** toggle (off by default). When you turn it on, your column layout and display settings (theme, dividers, hidden items) are shared across the devices where sync is activated, using Chrome's built-in `chrome.storage.sync` (your Google account). No new permission is required.
+- Sync is **per-device and opt-in by design**, so a work and a personal device can keep different layouts — the toggle's on/off state is itself never synced. Edits on any synced device update the others, applied live on open tabs.
+- **Turning sync off prompts you to keep the current layout on this device or reset it to default** — either way your other devices stay synced. The cloud copy is left intact.
+- An ⓘ info glyph in the Sync section explains what's shared.
+
+### Changed
+- The saved layout now identifies each folder by a **re-resolvable reference** (root type, account/local subtree, and title path) instead of a raw bookmark node ID. Bookmark node IDs aren't stable across devices — or even across restarts — so this makes the layout robust cross-device and more resilient locally. Existing layouts migrate automatically on first launch.
+- Layout storage is **sharded** (one key per column) to stay under the sync per-item size limit.
+- A folder referenced in a column that can't be found on the current device now shows a dimmed **"needs re-link"** placeholder instead of silently disappearing — it resolves automatically on a device that has the folder.
+
 ## [1.2.0] — 2026-06-03
 
 ### Added

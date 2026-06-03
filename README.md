@@ -2,7 +2,7 @@
 
 A Chrome extension that replaces the new tab page with a clean, customizable bookmark viewer organized in resizable columns.
 
-**Version 1.2.0** — adds the drill-down "+ Add item" menu, cross-column drag of bookmarks/folders, and a Cmd/Ctrl+E shortcut.
+**Version 1.3.0** — adds opt-in cross-device sync of your column layout and display settings via your Google account (`chrome.storage.sync`).
 
 ![New Tab Bookmark Columns](github-screenshot.png)
 
@@ -22,6 +22,7 @@ A Chrome extension that replaces the new tab page with a clean, customizable boo
   - **Search** — instant filter across all bookmarks
 - **Themes** — system / light / dark, with a live listener on the system preference
 - **Display settings** — toggle bookmark dividers, folder title dividers, column dividers, and hidden items
+- **Cross-device sync (opt-in)** — a **Sync** settings toggle (off by default) shares your column layout and display settings across the devices where you enable it, via Chrome's `chrome.storage.sync` (your Google account); per-device by design, with a keep-or-reset prompt when you turn it off. Folders are identified by a re-resolvable reference (root type, account/local subtree, title path), not raw node IDs, so the layout survives cross-device ID differences
 - **Favicons** — apple-touch-icon → Chrome favicon fallback, domain-level cache, persisted in `chrome.storage.local`
 - **Inline confirmations** for destructive actions (delete folder, delete bookmark)
 - **Keyboard** — `Cmd/Ctrl+E` toggles edit mode; `Esc` closes the settings panel, the open `+ Add item` menu, or exits edit mode
@@ -43,10 +44,10 @@ The extension overrides Chrome's new tab page via `chrome_url_overrides`.
 ## Permissions
 
 - `bookmarks` — read and write your Chrome bookmark tree
-- `storage` — persist theme, column layout, favicon cache, folder open/closed state, hidden IDs
+- `storage` — persist theme, column layout, favicon cache, folder open/closed state, hidden IDs. When you opt into sync, the layout and display settings are stored in `chrome.storage.sync` (synced through your own Google account) instead of locally; the favicon cache and per-device flags always stay local. No new permission is needed for sync.
 - `favicon` — fetch site favicons via Chrome's internal `_favicon/` URL
 
-No remote requests are made beyond the per-domain `apple-touch-icon.png` probe used by the favicon fallback chain. Nothing is sent to a third-party server.
+No remote requests are made beyond the per-domain `apple-touch-icon.png` probe used by the favicon fallback chain. Nothing is sent to a third-party server we operate; opt-in sync travels only through Chrome's own sync infrastructure tied to your Google account.
 
 ---
 
@@ -56,7 +57,7 @@ No remote requests are made beyond the per-domain `apple-touch-icon.png` probe u
 - Vanilla JS — no frameworks, no build step
 - CSS custom properties for the full design token system (color, typography, spacing)
 - `chrome.bookmarks` for tree reads and `move`/`update`/`remove`
-- `chrome.storage.local` for all persistent state
+- `chrome.storage.local` for device-local state (favicon cache, sync opt-in flag, folder open/closed, hidden IDs); `chrome.storage.sync` for the layout + display settings when sync is enabled, with a `storage.onChanged` listener for live cross-device updates
 - HTML5 Drag and Drop API + FLIP animations for column / folder / bookmark reorder
 - `data-theme` attribute on `<html>` for light/dark switching; system theme uses `window.matchMedia` with a live listener
 
@@ -79,14 +80,15 @@ new-tab/
 
 ## Release status
 
-- [x] Version bumped to 1.2.0
+Targeting **1.3.0** (submit after 1.2.0 clears review):
+
+- [x] Version bumped to 1.3.0
+- [x] Dev-test manifest `key` removed
 - [x] CHANGELOG written
-- [x] Manual smoke test pass
-- [x] Store screenshots (1280×800)
-- [x] Store listing description
-- [x] Chrome Web Store Developer Dashboard registration
-- [x] Zip and upload
-- [x] Submitted for review
+- [ ] Manual smoke test pass (incl. real two-device + dual-subtree account)
+- [ ] Store listing description updated for sync
+- [ ] Zip and upload
+- [ ] Submitted for review
 
 See `CHANGELOG.md` for the full release notes.
 

@@ -2124,8 +2124,8 @@ function applySyncHint() {
   const hint = document.getElementById('sync-hint');
   if (!hint) return;
   hint.textContent = layoutSyncEnabled
-    ? 'On — shared across devices where you turn this on.'
-    : 'Off — this device keeps its own layout.';
+    ? 'Synced. This layout is shared with your other synced devices — any change you make here updates them too. Turning sync off keeps this layout on this device only; your other devices stay synced.'
+    : 'Not synced. This layout is saved on this device only. Turn on to share one layout across the devices where you enable it.';
 }
 
 // This device's layout captured at enable time, so the "use this device's

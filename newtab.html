@@ -70,6 +70,18 @@
     <div class="settings-section">
       <h3>Columns</h3>
       <button id="edit-view-toggle" class="btn-secondary">Edit columns</button>
+      <label class="toggle-row" style="margin-top: 14px;">
+        <span class="toggle">
+          <input type="checkbox" id="sync-toggle">
+          <span class="toggle-slider"></span>
+        </span>
+        Sync layout across devices
+      </label>
+      <div id="sync-hint" class="settings-hint"></div>
+      <div id="sync-conflict" class="sync-conflict hidden">
+        <span class="sync-conflict-msg">Now showing your synced layout on this device.</span>
+        <button id="sync-use-local" class="btn-secondary">Use this device’s layout instead</button>
+      </div>
     </div>
 
     <div id="settings-footer">New Tab — Version <span id="version-number"></span></div>

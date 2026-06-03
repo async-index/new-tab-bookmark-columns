@@ -2085,6 +2085,82 @@ function renderSettingsPanel() {
     closeSettings();
     toggleEditMode(true);
   };
+
+  // Optional cross-device layout sync — per-device, opt-in (see sync-design.md).
+  const syncToggle = document.getElementById('sync-toggle');
+  syncToggle.checked = layoutSyncEnabled;
+  applySyncHint();
+  syncToggle.onchange = async () => {
+    document.getElementById('sync-conflict').classList.add('hidden');
+    if (syncToggle.checked) await enableSync();
+    else                    await disableSync();
+    applySyncHint();
+  };
+  document.getElementById('sync-use-local').onclick = () => {
+    // Override the adopted synced layout with this device's — push it up.
+    document.getElementById('sync-conflict').classList.add('hidden');
+    state.columns = preSyncColumns || state.columns;
+    preSyncColumns = null;
+    lastPersistedLayout = null;
+    persist();        // overwrite the cloud copy with this device's layout
+    renderColumns();
+  };
+}
+
+function applySyncHint() {
+  const hint = document.getElementById('sync-hint');
+  if (!hint) return;
+  hint.textContent = layoutSyncEnabled
+    ? 'On — shared across devices where you turn this on.'
+    : 'Off — this device keeps its own layout.';
+}
+
+// This device's layout captured at enable time, so the "use this device's
+// instead" override can restore it after we adopt the synced layout by default.
+let preSyncColumns = null;
+
+async function enableSync() {
+  if (!chrome.storage.sync) { layoutSyncEnabled = false; return; }
+  preSyncColumns = state.columns.slice();
+  layoutSyncEnabled = true; // active store is now sync
+  await chrome.storage.local.set({ [SYNC_ENABLED_KEY]: true });
+
+  const cloud = await chrome.storage.sync.get(['columns']);
+  const localCols = serializeColumns(); // this device's layout (pre-adopt)
+  if (!cloud.columns || !cloud.columns.length) {
+    // Cloud empty → this device seeds the shared baseline.
+    lastPersistedLayout = null;
+    await persist();
+    preSyncColumns = null;
+  } else if (JSON.stringify(cloud.columns) === JSON.stringify(localCols)) {
+    preSyncColumns = null; // identical — just switched stores
+  } else {
+    // Differing layouts → adopt the synced one by default (never overwrite the
+    // shared copy unasked), and offer a one-click override.
+    await reloadFromActiveStore();
+    document.getElementById('sync-conflict').classList.remove('hidden');
+  }
+}
+
+async function disableSync() {
+  layoutSyncEnabled = false; // active store is now local again
+  preSyncColumns = null;
+  await chrome.storage.local.set({ [SYNC_ENABLED_KEY]: false });
+  lastPersistedLayout = null;
+  await persist(); // snapshot the current layout to local; cloud left for others
+}
+
+// Re-read the layout bundle from the active store and re-render.
+async function reloadFromActiveStore() {
+  const b = await layoutStore().get(['theme', 'dividers', 'hideHandles', 'showHidden', 'hideFolderDividers', 'columns']);
+  if (b.theme)                    { state.theme = b.theme; applyTheme(state.theme); }
+  if (b.dividers != null)         { state.dividers = b.dividers; applyDividers(state.dividers); }
+  if (b.hideHandles != null)      { state.hideHandles = b.hideHandles; applyHideHandles(state.hideHandles); }
+  if (b.showHidden != null)         state.showHidden = b.showHidden;
+  if (b.hideFolderDividers != null) { state.hideFolderDividers = b.hideFolderDividers; applyHideFolderDividers(state.hideFolderDividers); }
+  state.columns = hydrateColumns(b.columns || []);
+  lastPersistedLayout = null;
+  renderColumns();
 }
 
 

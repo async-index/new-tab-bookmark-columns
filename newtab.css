@@ -220,6 +220,16 @@ html, body {
   padding-bottom: 0;
 }
 
+/* "Needs re-link" placeholder — a synced layout slot whose folder isn't on this
+   device. Dimmed so it reads as inactive, not a real folder. */
+.unresolved-group { opacity: 0.55; }
+.unresolved-label::before { content: '⚠ '; }
+.unresolved-note {
+  font-size: var(--font-sm);
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 /* ── Subfolders ─────────────────────────────────────────────────────────────── */
 
 .subfolder-group {

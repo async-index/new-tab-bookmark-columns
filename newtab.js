@@ -49,6 +49,13 @@ let addMenuCleanup = null; // tears down the flyout's document listeners
 let folderOpen = {};   // { [folderId]: boolean } subfolder open state
 let searchQuery = '';  // session-only — persists across re-renders, not across reloads
 let editMode = false;  // session-only — column-view inline edit overlay
+// Layout persistence uses folder *references* (see folderRef); in memory we keep
+// node-id strings. Unresolved refs (folder absent on this device) become
+// `__unresolved__:N` markers whose ref is stashed here for re-link/re-persist.
+let unresolvedRefs = new Map(); // marker -> reference object
+let unresolvedSeq = 0;
+let migratedOldFormat = false;  // set during hydrate when old node-id data was upgraded
+let lastPersistedLayout = null; // JSON of last write, to skip redundant persists
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
@@ -77,6 +84,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   allFolders = collectFolders(tree[0]);
   allBookmarks = collectBookmarks(tree[0]);
   await loadRecent();
+
+  // Resolve the stored layout (folder references) to live node ids now that the
+  // bookmark tree is loaded. Old node-id-based layouts are upgraded in place.
+  if (state.columns.length) {
+    state.columns = hydrateColumns(state.columns);
+    if (migratedOldFormat) persist(); // re-save in the reference format
+  }
 
   if (!state.columns.length) {
     state.columns = defaultColumns(tree[0]);
@@ -127,14 +141,24 @@ function collectBookmarks(node, acc = []) {
   return acc;
 }
 
+// Find the "Bookmarks bar" top-level container without relying on its node id.
+// Chrome's id "1" is not guaranteed: the 2025+ account/local bookmark-subtree
+// split can change it, and an account can have TWO bookmarks-bar containers (one
+// syncing/account, one device-local). Prefer the account (syncing) subtree so
+// the seed is sync-friendly; fall back to folderType, then the legacy id "1",
+// then the first container. `folderType`/`syncing` are undefined on Chrome <134,
+// where the id/first-container fallbacks apply.
+function bookmarksBar(containers) {
+  const bars = containers.filter(c => c.folderType === 'bookmarks-bar');
+  return bars.find(c => c.syncing) || bars[0]
+      || containers.find(c => c.id === '1') || containers[0] || null;
+}
+
 function defaultColumns(root) {
   // First-install default: a single column with the Bookmarks bar + Search
   // widget. Simple, immediately useful, and demonstrates both concepts.
-  // The bookmark tree root has standard children:
-  //   id "1" = Bookmarks bar  (preferred)
-  //   id "2" = Other bookmarks (fallback)
   const containers = root.children ?? [];
-  const bar = containers.find(n => n.id === '1') ?? containers[0];
+  const bar = bookmarksBar(containers);
   const folderIds = bar ? [bar.id, SEARCH_WIDGET_ID] : [SEARCH_WIDGET_ID];
   return [{
     id: `col-0-${Date.now()}`,
@@ -147,9 +171,130 @@ function folderById(id) {
   return allFolders.find(f => f.id === id);
 }
 
+const childrenFolders = id => allFolders.filter(f => f.parentId === id);
+
+// ─── Folder references (cross-session / cross-device identity) ────────────────
+// Bookmark node IDs aren't stable across devices or even across restarts (see
+// sync-design.md), so the persisted layout identifies a folder by a
+// re-resolvable reference instead of a raw id: the special root it lives under
+// (`folderType`), the subtree (`syncing`: account vs local), the legacy root id
+// as an old-Chrome fallback, and the title path from that root down to the
+// folder. In memory we still use live node ids; references exist only at the
+// persist/load boundary.
+
+// Build a reference from a live folder node.
+function folderRef(node) {
+  const path = [];
+  let n = node;
+  while (n && n.parentId && n.parentId !== '0') {
+    path.unshift(n.title || '');
+    n = folderById(n.parentId);
+  }
+  const container = n; // the top-level container (parentId '0'), or null
+  return {
+    root: container?.folderType ?? null,   // 'bookmarks-bar' | 'other' | 'mobile' | 'managed' | null
+    syncing: container?.syncing ?? null,    // true (account) | false (local) | null (old Chrome)
+    rootId: container?.id ?? null,          // fallback when folderType is unavailable
+    path,                                    // titles, container→folder; [] if node IS the container
+  };
+}
+
+// Resolve a reference to a live node id on THIS device, or null if it no longer
+// matches (folder renamed/moved/deleted, or a sync-only folder absent here).
+function resolveRef(ref) {
+  if (!ref || typeof ref !== 'object') return null;
+  const containers = childrenFolders('0');
+  let container = null;
+  if (ref.root) {
+    const m = containers.filter(c => c.folderType === ref.root);
+    container = (ref.syncing == null ? null : m.find(c => c.syncing === ref.syncing)) || m[0] || null;
+  }
+  if (!container && ref.rootId != null) container = containers.find(c => c.id === ref.rootId) || null;
+  if (!container) return null;
+  let node = container;
+  for (const title of ref.path) {
+    const kids = childrenFolders(node.id).filter(c => c.title === title);
+    if (!kids.length) return null;
+    node = kids[0]; // best-effort among same-named siblings (index hint: TODO)
+  }
+  return node.id;
+}
+
+// Stable string key for a reference (for dedup / future folderOpen·hiddenIds use).
+function refKey(ref) {
+  return `${ref.root || ref.rootId || '?'}#${ref.syncing ?? '?'}#${ref.path.join(' ')}`;
+}
+
 // True when `folderId` is `ancestorId` itself or nested anywhere beneath it.
 // Used to forbid dropping a folder into its own subtree (chrome.bookmarks.move
 // rejects such cycles).
+const WIDGET_PREFIX = '__widget:';
+const UNRESOLVED_PREFIX = '__unresolved__:';
+const isWidgetId = id => typeof id === 'string' && id.startsWith(WIDGET_PREFIX);
+const isUnresolved = id => typeof id === 'string' && id.startsWith(UNRESOLVED_PREFIX);
+
+// LOAD: a stored column item -> an in-memory string (node id | widget | unresolved
+// marker), or null to drop. Handles BOTH the old format (raw node-id strings) and
+// the new format (reference objects). Requires `allFolders` to be populated.
+function hydrateItem(item) {
+  if (typeof item === 'string') {
+    if (item.startsWith(WIDGET_PREFIX)) return item;        // widget sentinel
+    migratedOldFormat = true;                                // old raw node id
+    return folderById(item) ? item : null;                  // keep if still here
+  }
+  if (item && typeof item === 'object') {                    // new: a reference
+    const id = resolveRef(item);
+    if (id) return id;
+    const marker = `${UNRESOLVED_PREFIX}${unresolvedSeq++}`; // can't resolve here
+    unresolvedRefs.set(marker, item);
+    return marker;
+  }
+  return null;
+}
+
+function hydrateColumns(rawColumns) {
+  unresolvedRefs.clear();
+  unresolvedSeq = 0;
+  migratedOldFormat = false;
+  return (rawColumns || []).map(col => ({
+    id: col.id,
+    width: col.width,
+    folderIds: (col.folderIds || []).map(hydrateItem).filter(x => x != null),
+  }));
+}
+
+// PERSIST: an in-memory item -> its stored form (reference | widget | preserved ref).
+function serializeItem(item) {
+  if (isWidgetId(item)) return item;
+  if (isUnresolved(item)) return unresolvedRefs.get(item) || null;
+  const node = folderById(item);
+  return node ? folderRef(node) : null;                     // folder gone -> dropped
+}
+
+function serializeColumns() {
+  return state.columns.map(col => ({
+    id: col.id,
+    width: col.width,
+    folderIds: col.folderIds.map(serializeItem).filter(x => x != null),
+  }));
+}
+
+// REFRESH (bookmark event): drop folders deleted since last render, and re-resolve
+// any unresolved markers whose folder has (re)appeared.
+function rehydrateColumns() {
+  state.columns.forEach(col => {
+    col.folderIds = col.folderIds.map(item => {
+      if (isWidgetId(item)) return item;
+      if (isUnresolved(item)) {
+        const id = resolveRef(unresolvedRefs.get(item));
+        if (id) { unresolvedRefs.delete(item); return id; }
+        return item;
+      }
+      return folderById(item) ? item : null;                 // node id; drop if gone
+    }).filter(x => x != null);
+  });
+}
+
 function isDescendantOrSelf(folderId, ancestorId) {
   let id = folderId;
   while (id) {
@@ -615,8 +760,10 @@ async function refresh() {
   allFolders = collectFolders(tree[0]);
   allBookmarks = collectBookmarks(tree[0]);
   await loadRecent();
+  rehydrateColumns(); // drop deleted folders; re-resolve markers that reappeared
   pruneHiddenIds();
   renderColumns();
+  persist();          // capture renames/moves into stored refs (no-op if unchanged)
 }
 
 // Drop hidden-ID entries that refer to deleted bookmarks/folders or removed
@@ -641,6 +788,33 @@ function pruneHiddenIds() {
     if (ids.size === 0) { delete hiddenIds[colId]; changed = true; }
   }
   if (changed) persistHiddenIds();
+}
+
+// Placeholder for a synced layout slot whose folder isn't resolvable on this
+// device (renamed/moved while closed, deleted, or a sync-only folder absent
+// here). It's a real `.folder-group` with a `data-fid` so column/folder drags
+// preserve it; edit-mode × removes it. (Re-link-via-picker is a later polish.)
+function makeUnresolvedGroup(marker) {
+  const ref = unresolvedRefs.get(marker);
+  const lastTitle = ref?.path?.[ref.path.length - 1] || ref?.root || 'Folder';
+
+  const group = document.createElement('div');
+  group.className = 'folder-group unresolved-group';
+  group.dataset.fid = marker;
+
+  const label = document.createElement('div');
+  label.className = 'folder-label unresolved-label';
+  label.textContent = lastTitle;
+  label.title = "This folder isn't on this device — it may have been renamed, moved, or removed.";
+  group.appendChild(label);
+
+  const note = document.createElement('div');
+  note.className = 'unresolved-note';
+  note.textContent = 'Not found on this device';
+  group.appendChild(note);
+
+  group.appendChild(makeEditFolderRemove(marker)); // edit-mode × removes the slot
+  return group;
 }
 
 function makeColumn(col, idx) {
@@ -699,6 +873,10 @@ function makeColumn(col, idx) {
     }
     if (fid === SEARCH_WIDGET_ID) {
       el.appendChild(makeSearchGroup());
+      return;
+    }
+    if (isUnresolved(fid)) {
+      el.appendChild(makeUnresolvedGroup(fid));
       return;
     }
     const folder = folderById(fid);
@@ -1917,12 +2095,19 @@ function applyHideFolderDividers(on) {
 // ─── Persistence ──────────────────────────────────────────────────────────────
 
 function persist() {
-  return chrome.storage.local.set({
+  const payload = {
     theme: state.theme,
     dividers: state.dividers,
     hideHandles: state.hideHandles,
     showHidden: state.showHidden,
     hideFolderDividers: state.hideFolderDividers,
-    columns: state.columns,
-  });
+    layoutSchema: 2,
+    columns: serializeColumns(),   // node ids -> folder references
+  };
+  // Skip identical writes — avoids churn from refresh()-driven re-persists and
+  // keeps well under the future storage.sync write-rate limits.
+  const sig = JSON.stringify(payload);
+  if (sig === lastPersistedLayout) return Promise.resolve();
+  lastPersistedLayout = sig;
+  return chrome.storage.local.set(payload);
 }

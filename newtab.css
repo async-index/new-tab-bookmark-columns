@@ -775,22 +775,6 @@ html, body {
   visibility: visible;
 }
 
-/* The adopt-time "replace synced layout" override row. */
-.sync-conflict {
-  margin-top: 8px;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--hover);
-}
-.sync-conflict.hidden { display: none; }
-.sync-conflict-msg {
-  display: block;
-  margin-bottom: 8px;
-  font-size: var(--font-sm);
-  color: var(--text);
-}
-
 /* ── Bookmark drag & edit ───────────────────────────────────────────────────── */
 
 .item-hidden {

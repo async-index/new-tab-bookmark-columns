@@ -132,25 +132,34 @@ document.addEventListener('DOMContentLoaded', async () => {
   // write — guarded by comparing against our current serialized columns).
   chrome.storage.onChanged.addListener(async (changes, area) => {
     if (!layoutSyncEnabled || area !== 'sync') return;
-    const relevant = 'colOrder' in changes || SETTINGS_KEYS.some(k => k in changes)
+    const settingsChanged = SETTINGS_KEYS.some(k => k in changes);
+    const columnsChanged = 'colOrder' in changes
       || Object.keys(changes).some(k => k.startsWith('col:'));
-    if (!relevant) return;
+    if (!settingsChanged && !columnsChanged) return;
     // Snapshot our current layout BEFORE reading/hydrating the incoming one
     // (hydrateColumns resets the shared unresolved-ref map).
     const currentSer = JSON.stringify(serializeColumns());
     const { settings, rawColumns, colIds } = await readLayout(chrome.storage.sync);
-    const hydrated = hydrateColumns(rawColumns);
-    const incomingSer = JSON.stringify(hydrated.map(c =>
-      ({ id: c.id, width: c.width, folderIds: serializeFolderIds(c.folderIds) })));
-    lastColIds = colIds;
-    if (incomingSer === currentSer) return;     // our own echo / already current
-    Object.assign(state, settings);
-    applyTheme(state.theme);
-    applyDividers(state.dividers);
-    applyHideHandles(state.hideHandles);
-    applyHideFolderDividers(state.hideFolderDividers);
-    state.columns = hydrated;
-    renderColumns();
+    // Apply incoming settings live, independent of the column echo-guard below —
+    // a pure settings change from another device still has columns unchanged.
+    if (settingsChanged) {
+      Object.assign(state, settings);
+      applyTheme(state.theme);
+      applyDividers(state.dividers);
+      applyHideHandles(state.hideHandles);
+      applyHideFolderDividers(state.hideFolderDividers);
+      syncSettingsControls();
+    }
+    if (columnsChanged) {
+      const hydrated = hydrateColumns(rawColumns);
+      const incomingSer = JSON.stringify(hydrated.map(c =>
+        ({ id: c.id, width: c.width, folderIds: serializeFolderIds(c.folderIds) })));
+      lastColIds = colIds;
+      if (incomingSer !== currentSer) {     // not our own echo / already current
+        state.columns = hydrated;
+        renderColumns();
+      }
+    }
   });
 });
 
@@ -2042,6 +2051,20 @@ function closeSettings() {
   document.getElementById('settings-toggle').blur();
 }
 
+// Refresh the settings panel's control states from `state` (e.g. after a live
+// remote sync change updates theme/dividers). No-op when the panel isn't open.
+function syncSettingsControls() {
+  const panel = document.getElementById('settings-panel');
+  if (!panel || panel.classList.contains('hidden')) return;
+  document.querySelectorAll('.theme-btn').forEach(btn =>
+    btn.classList.toggle('active', btn.dataset.value === state.theme));
+  const set = (id, checked) => { const el = document.getElementById(id); if (el) el.checked = checked; };
+  set('dividers-toggle', state.dividers);
+  set('hide-handles-toggle', !state.hideHandles);
+  set('hide-folder-dividers-toggle', !state.hideFolderDividers);
+  set('show-hidden-toggle', state.showHidden);
+}
+
 function renderSettingsPanel() {
   // Theme
   document.querySelectorAll('.theme-btn').forEach(btn => {
@@ -2103,7 +2126,6 @@ function renderSettingsPanel() {
   const syncToggle = document.getElementById('sync-toggle');
   syncToggle.checked = layoutSyncEnabled;
   syncToggle.onchange = async () => {
-    document.getElementById('sync-conflict').classList.add('hidden');
     if (syncToggle.checked) await enableSync();
     else                    await disableSync();
   };
@@ -2113,47 +2135,28 @@ function renderSettingsPanel() {
     e.preventDefault();
     e.stopPropagation();
   });
-  document.getElementById('sync-use-local').onclick = () => {
-    // Override the adopted synced layout with this device's — push it up.
-    document.getElementById('sync-conflict').classList.add('hidden');
-    state.columns = preSyncColumns || state.columns;
-    preSyncColumns = null;
-    lastPersistedLayout = null;
-    persist();        // overwrite the cloud copy with this device's layout
-    renderColumns();
-  };
 }
-
-// This device's layout captured at enable time, so the "use this device's
-// instead" override can restore it after we adopt the synced layout by default.
-let preSyncColumns = null;
 
 async function enableSync() {
   if (!chrome.storage.sync) { layoutSyncEnabled = false; return; }
-  preSyncColumns = state.columns.slice();
   layoutSyncEnabled = true; // active store is now sync
   await chrome.storage.local.set({ [SYNC_ENABLED_KEY]: true });
 
   const { rawColumns: cloudCols } = await readLayout(chrome.storage.sync);
-  const localCols = serializeColumns(); // this device's layout (pre-adopt)
   if (!cloudCols.length) {
-    // Cloud empty → this device seeds the shared baseline.
+    // Cloud empty → this device seeds the shared baseline (layout + settings).
     lastPersistedLayout = null;
     await persist();
-    preSyncColumns = null;
-  } else if (JSON.stringify(cloudCols) === JSON.stringify(localCols)) {
-    preSyncColumns = null; // identical — just switched stores
   } else {
-    // Differing layouts → adopt the synced one by default (never overwrite the
-    // shared copy unasked), and offer a one-click override.
+    // Cloud already has a layout → adopt it (and its settings). The first device
+    // you enable seeds the shared copy; others adopt it. To change the shared
+    // layout, just edit on any synced device — changes propagate.
     await reloadFromActiveStore();
-    document.getElementById('sync-conflict').classList.remove('hidden');
   }
 }
 
 async function disableSync() {
   layoutSyncEnabled = false; // active store is now local again
-  preSyncColumns = null;
   await chrome.storage.local.set({ [SYNC_ENABLED_KEY]: false });
   lastPersistedLayout = null;
   await persist(); // snapshot the current layout to local; cloud left for others

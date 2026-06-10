@@ -53,10 +53,13 @@ let editMode = false;  // session-only — column-view inline edit overlay
 // node-id strings. Unresolved refs (folder absent on this device) become
 // `__unresolved__:N` markers whose ref is stashed here for re-link/re-persist.
 let unresolvedRefs = new Map(); // marker -> reference object
+let resolvedRefs = new Map();   // live node id -> the ref it resolved from, so a
+                                // vanished id can rebind across sync id churn (#9)
 let unresolvedSeq = 0;
 let migratedOldFormat = false;  // set during hydrate when old node-id data was upgraded
 let lastPersistedLayout = null; // JSON of last write, to skip redundant persists
 let migratedToSharded = false;  // set on load when a legacy single-`columns` key was read
+let activeStoreTooNew = false;  // active store holds a newer layoutSchema than we grok (#8)
 // Optional, per-device cross-device sync (see sync-design.md §4.7). The layout
 // bundle (settings + columns) lives in chrome.storage.sync when the user opts
 // in, otherwise chrome.storage.local. faviconCache, folderOpen, hiddenIds, and
@@ -85,7 +88,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // The layout bundle (settings + sharded columns) from the active store (sync
   // if the user opted in, otherwise local).
-  let { settings, rawColumns, legacy, hadColOrder, missingShards } = await readLayout(layoutStore());
+  let { settings, rawColumns, legacy, hadColOrder, missingShards, tooNew } = await readLayout(layoutStore());
   // If sync is on but its store came back empty — a seed/write that failed
   // against sync's quota, or a store wiped elsewhere — fall back to the
   // device-local mirror persist() keeps on write failures, rather than going on
@@ -93,9 +96,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (layoutSyncEnabled && !hadColOrder && !rawColumns.length) {
     const localMirror = await readLayout(chrome.storage.local);
     if (localMirror.hadColOrder || localMirror.rawColumns.length) {
-      ({ settings, rawColumns, legacy, hadColOrder, missingShards } = localMirror);
+      ({ settings, rawColumns, legacy, hadColOrder, missingShards, tooNew } = localMirror);
     }
   }
+  activeStoreTooNew = tooNew; // gate persist() so we never clobber newer data (#8)
   Object.assign(state, settings);
   migratedToSharded = legacy;
   state.columns = rawColumns; // raw refs; hydrated to live node ids after the tree loads
@@ -153,7 +157,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       || Object.keys(changes).some(k => k.startsWith('col:'));
     if (!settingsChanged && !columnsChanged) return;
     const currentSer = JSON.stringify(serializeColumns());
-    const { settings, rawColumns, missingShards } = await readLayout(chrome.storage.sync);
+    const { settings, rawColumns, missingShards, tooNew } = await readLayout(chrome.storage.sync);
+    // A newer extension version on another device wrote a schema we can't parse —
+    // don't adopt it, and remember so persist() won't clobber it back (#8).
+    if (tooNew) { activeStoreTooNew = true; return; }
     // A column change can arrive before all its shards have replicated, reading
     // as a truncated layout. Wait for the rest rather than adopt/persist a
     // partial one (#2) — a later onChanged fires when the shards land.
@@ -298,7 +305,10 @@ function folderRef(node) {
 // Resolve a reference to a live node id on THIS device, or null if it no longer
 // matches (folder renamed/moved/deleted, or a sync-only folder absent here).
 function resolveRef(ref) {
-  if (!ref || typeof ref !== 'object') return null;
+  // Guard the shape: a malformed/foreign ref (e.g. missing `path` from corrupted
+  // or newer-schema sync data) must resolve to null, not throw mid-hydrate and
+  // blank the page (#8).
+  if (!ref || typeof ref !== 'object' || !Array.isArray(ref.path)) return null;
   const containers = childrenFolders('0');
   let container = null;
   if (ref.root) {
@@ -350,7 +360,7 @@ function hydrateItem(item) {
   }
   if (item && typeof item === 'object') {                    // new: a reference
     const id = resolveRef(item);
-    if (id) return id;
+    if (id) { resolvedRefs.set(id, item); return id; } // remember the ref for #9
     const marker = `${UNRESOLVED_PREFIX}${unresolvedSeq++}`; // can't resolve here
     unresolvedRefs.set(marker, item);
     return marker;
@@ -360,6 +370,7 @@ function hydrateItem(item) {
 
 function hydrateColumns(rawColumns) {
   unresolvedRefs.clear();
+  resolvedRefs.clear();
   unresolvedSeq = 0;
   migratedOldFormat = false;
   return (rawColumns || []).map(col => ({
@@ -395,11 +406,24 @@ function rehydrateColumns() {
     col.folderIds = col.folderIds.map(item => {
       if (isWidgetId(item)) return item;
       if (isUnresolved(item)) {
-        const id = resolveRef(unresolvedRefs.get(item));
-        if (id) { unresolvedRefs.delete(item); return id; }
+        const ref = unresolvedRefs.get(item);
+        const id = resolveRef(ref);
+        if (id) { unresolvedRefs.delete(item); resolvedRefs.set(id, ref); return id; }
         return item;
       }
-      return folderById(item) ? item : null;                 // node id; drop if gone
+      // Plain node id. Keep it if the folder is still here. If the id vanished
+      // but we remember the ref it resolved from, the folder may just have a new
+      // id (sync id churn / account-bookmarks migration) — re-resolve and rebind
+      // rather than dropping the slot and syncing the loss everywhere (#9). Only
+      // a genuinely gone folder (ref no longer resolves) is dropped.
+      if (folderById(item)) return item;
+      const ref = resolvedRefs.get(item);
+      if (ref) {
+        resolvedRefs.delete(item);
+        const id = resolveRef(ref);
+        if (id) { resolvedRefs.set(id, ref); return id; }
+      }
+      return null;
     }).filter(x => x != null);
   });
 }
@@ -2223,8 +2247,9 @@ async function enableSync() {
   layoutSyncEnabled = true; // active store is now sync
   await chrome.storage.local.set({ [SYNC_ENABLED_KEY]: true });
 
-  const { rawColumns: cloudCols } = await readLayout(chrome.storage.sync);
-  if (!cloudCols.length) {
+  const { rawColumns: cloudCols, tooNew } = await readLayout(chrome.storage.sync);
+  activeStoreTooNew = tooNew; // don't seed/clobber a newer-schema cloud (#8)
+  if (!cloudCols.length && !tooNew) {
     // Cloud empty → this device seeds the shared baseline (layout + settings).
     lastPersistedLayout = null;
     await persist();
@@ -2247,13 +2272,15 @@ async function disableSync(reset) {
     pruneHiddenIds();
     renderColumns();
   }
+  activeStoreTooNew = false; // local is always our own schema — safe to write
   lastPersistedLayout = null;
   await persist(); // snapshot the (kept or reset) layout to local; cloud left for others
 }
 
 // Re-read the layout bundle from the active store and re-render.
 async function reloadFromActiveStore() {
-  const { settings, rawColumns } = await readLayout(layoutStore());
+  const { settings, rawColumns, tooNew } = await readLayout(layoutStore());
+  activeStoreTooNew = tooNew;
   Object.assign(state, settings);
   applySettings();
   state.columns = hydrateColumns(rawColumns);
@@ -2318,8 +2345,10 @@ function applySettings() {
 // 8 KB/item limit: settings keys + `colOrder` (column id list) + one `col:<id>`
 // per column. Used for both stores (harmless in local). readLayout also reads
 // the legacy single-`columns` key so pre-3 layouts migrate to shards on load.
+const LAYOUT_SCHEMA = 3; // bump when the stored layout shape changes incompatibly
+
 async function writeLayout(store, serialized = serializeColumns()) {
-  const payload = { layoutSchema: 3, colOrder: serialized.map(c => c.id) };
+  const payload = { layoutSchema: LAYOUT_SCHEMA, colOrder: serialized.map(c => c.id) };
   SETTINGS_KEYS.forEach(k => { payload[k] = state[k]; });
   serialized.forEach(c => { payload[`col:${c.id}`] = { width: c.width, folderIds: c.folderIds }; });
   // Read THIS store's existing column ids — and whether the legacy single-key
@@ -2339,9 +2368,13 @@ async function writeLayout(store, serialized = serializeColumns()) {
 }
 
 async function readLayout(store) {
-  const head = await store.get([...SETTINGS_KEYS, 'colOrder', 'columns']);
+  const head = await store.get([...SETTINGS_KEYS, 'layoutSchema', 'colOrder', 'columns']);
   const settings = {};
   SETTINGS_KEYS.forEach(k => { if (head[k] != null) settings[k] = head[k]; });
+  // A store written by a newer extension version (higher schema) may use a shape
+  // we can't parse correctly. Signal callers so they neither adopt nor — crucially
+  // — overwrite it back in our older format (#8).
+  const tooNew = typeof head.layoutSchema === 'number' && head.layoutSchema > LAYOUT_SCHEMA;
   let rawColumns = [], legacy = false, hadColOrder = false, missingShards = false;
   if (Array.isArray(head.colOrder)) {                       // sharded (schema 3)
     hadColOrder = true;
@@ -2357,7 +2390,7 @@ async function readLayout(store) {
     rawColumns = head.columns;
     legacy = true;
   }
-  return { settings, rawColumns, legacy, hadColOrder, missingShards };
+  return { settings, rawColumns, legacy, hadColOrder, missingShards, tooNew };
 }
 
 // Format-independent signature of the persisted layout (settings + columns).
@@ -2370,6 +2403,10 @@ function layoutSignature(serialized = serializeColumns()) {
 }
 
 function persist() {
+  // Never write over a store whose layout schema is newer than we understand —
+  // an older extension version sharing the sync area must not clobber a newer
+  // device's data in our format (review #8).
+  if (activeStoreTooNew) return Promise.resolve();
   // Identical layouts skip the write (avoids churn from refresh() re-persists
   // and respects sync's write-rate limits). Serialize the columns once and reuse
   // for both the signature and the write (review #10).

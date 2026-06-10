@@ -735,7 +735,7 @@ html, body {
 .kbd-hint {
   font-family: var(--font-family);
   font-size: var(--font-ui);
-  opacity: 0.45;
+  opacity: 0.3;
   font-variant-numeric: tabular-nums;
 }
 

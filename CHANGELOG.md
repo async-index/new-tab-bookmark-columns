@@ -3,6 +3,23 @@
 All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.3.1] — 2026-06-10
+
+### Fixed
+- **Synced devices no longer fight over the layout.** Because each device records folder references with some device-local detail, two devices could repeatedly rewrite and re-adopt the same layout — flickering and burning through the sync write quota. An adopted layout is now treated as already-saved, so it settles instead of bouncing back and forth.
+- **A layout still replicating in is no longer overwritten.** Sync delivers a layout's pieces independently; arriving mid-transfer could make a device seed defaults over, or save a truncated copy of, the real layout. Incomplete reads are now left alone until the rest arrives.
+- **Edits are no longer lost when a sync write is rejected** (e.g. a very large column hitting Chrome's per-item size limit). The layout is mirrored to local storage as a fallback and recovered on the next open, instead of reverting to defaults.
+- **A folder that changes bookmark ID** (from bookmark sync or Chrome's account-bookmarks migration) is now re-matched by its reference and kept, instead of being dropped from the column and that loss syncing everywhere.
+- **The sync toggle now updates every open new-tab page**, so a second tab can't keep writing to the store you just switched away from.
+- A corrupted or future-version synced layout can no longer blank the page, and an older version of the extension won't overwrite a layout saved by a newer one.
+- A remotely-removed column no longer leaves stale hidden-item data behind.
+
+### Changed
+- The Sync info tooltip now notes that turning sync on adopts the layout your other synced devices already share, replacing what's on this device.
+
+### Internal
+- Removed redundant work and an extra storage write on every save; deleted dead code (and a stray null byte) introduced during 1.3.0.
+
 ## [1.3.0] — 2026-06-03
 
 ### Added

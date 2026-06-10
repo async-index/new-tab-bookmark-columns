@@ -2,7 +2,7 @@
 
 A Chrome extension that replaces the new tab page with a clean, customizable bookmark viewer organized in resizable columns.
 
-**Version 1.3.0** — adds opt-in cross-device sync of your column layout and display settings via your Google account (`chrome.storage.sync`).
+**Version 1.3.1** — opt-in cross-device sync of your column layout and display settings via your Google account (`chrome.storage.sync`).
 
 ![New Tab Bookmark Columns](github-screenshot.png)
 

@@ -66,6 +66,10 @@ let activeStoreTooNew = false;  // active store holds a newer layoutSchema than 
 // this flag itself are ALWAYS device-local (the flag must never sync, or it'd
 // propagate the choice to other devices). Default OFF.
 const SYNC_ENABLED_KEY = 'layoutSyncEnabled';
+// Grace period to let chrome.storage.sync's local cache pull the account's copy
+// from the cloud before enableSync() decides whether the cloud is empty — guards
+// against seeding our default layout over a not-yet-hydrated remote one.
+const SYNC_HYDRATE_GRACE_MS = 1500;
 let layoutSyncEnabled = false;
 function layoutStore() {
   return layoutSyncEnabled && chrome.storage.sync ? chrome.storage.sync : chrome.storage.local;
@@ -2256,17 +2260,33 @@ async function enableSync() {
   layoutSyncEnabled = true; // active store is now sync
   await chrome.storage.local.set({ [SYNC_ENABLED_KEY]: true });
 
-  const { rawColumns: cloudCols, tooNew } = await readLayout(chrome.storage.sync);
-  activeStoreTooNew = tooNew; // don't seed/clobber a newer-schema cloud (#8)
-  if (!cloudCols.length && !tooNew) {
-    // Cloud empty → this device seeds the shared baseline (layout + settings).
+  // chrome.storage.sync.get returns Chrome's LOCAL CACHE of the synced data,
+  // which a freshly-loaded page may not have pulled from the cloud yet — so an
+  // empty/partial read here does NOT prove the account has no layout. Seeding our
+  // (usually default) layout over a cloud that really has one would destroy the
+  // layout the user clicked Sync to LOAD, and propagate that loss to their other
+  // devices. So if the first read looks empty/partial, wait a grace period for
+  // the cache to hydrate and re-read before deciding.
+  let cloud = await readLayout(chrome.storage.sync);
+  const emptyOrPartial = !cloud.tooNew &&
+    (cloud.missingShards || (!cloud.hadColOrder && !cloud.rawColumns.length));
+  if (emptyOrPartial) {
+    await new Promise(r => setTimeout(r, SYNC_HYDRATE_GRACE_MS));
+    cloud = await readLayout(chrome.storage.sync);
+  }
+  activeStoreTooNew = cloud.tooNew; // don't seed/clobber a newer-schema cloud (#8)
+
+  if (cloud.tooNew || cloud.hadColOrder || cloud.rawColumns.length) {
+    // The cloud has (or schema-gates) a layout → ADOPT it; never overwrite it.
+    // This is the expected "load my layout from my account". If shards are still
+    // mid-replication, the onChanged listener finishes adopting them as they land.
+    await reloadFromActiveStore();
+  } else {
+    // Cloud is confirmed empty even after the grace re-read → this device seeds
+    // the shared baseline. The first device you enable seeds the shared copy;
+    // others adopt it. To change the shared layout, edit on any synced device.
     lastPersistedLayout = null;
     await persist();
-  } else {
-    // Cloud already has a layout → adopt it (and its settings). The first device
-    // you enable seeds the shared copy; others adopt it. To change the shared
-    // layout, just edit on any synced device — changes propagate.
-    await reloadFromActiveStore();
   }
 }
 

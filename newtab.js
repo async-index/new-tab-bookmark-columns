@@ -85,7 +85,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // The layout bundle (settings + sharded columns) from the active store (sync
   // if the user opted in, otherwise local).
-  const { settings, rawColumns, legacy, hadColOrder, missingShards } = await readLayout(layoutStore());
+  let { settings, rawColumns, legacy, hadColOrder, missingShards } = await readLayout(layoutStore());
+  // If sync is on but its store came back empty — a seed/write that failed
+  // against sync's quota, or a store wiped elsewhere — fall back to the
+  // device-local mirror persist() keeps on write failures, rather than going on
+  // to seed defaults over the user's real layout (review #5).
+  if (layoutSyncEnabled && !hadColOrder && !rawColumns.length) {
+    const localMirror = await readLayout(chrome.storage.local);
+    if (localMirror.hadColOrder || localMirror.rawColumns.length) {
+      ({ settings, rawColumns, legacy, hadColOrder, missingShards } = localMirror);
+    }
+  }
   Object.assign(state, settings);
   migratedToSharded = legacy;
   state.columns = rawColumns; // raw refs; hydrated to live node ids after the tree loads
@@ -2308,22 +2318,24 @@ function applySettings() {
 // 8 KB/item limit: settings keys + `colOrder` (column id list) + one `col:<id>`
 // per column. Used for both stores (harmless in local). readLayout also reads
 // the legacy single-`columns` key so pre-3 layouts migrate to shards on load.
-async function writeLayout(store) {
-  const payload = { layoutSchema: 3, colOrder: state.columns.map(c => c.id) };
+async function writeLayout(store, serialized = serializeColumns()) {
+  const payload = { layoutSchema: 3, colOrder: serialized.map(c => c.id) };
   SETTINGS_KEYS.forEach(k => { payload[k] = state[k]; });
-  state.columns.forEach(c => {
-    payload[`col:${c.id}`] = { width: c.width, folderIds: serializeFolderIds(c.folderIds) };
-  });
-  // Read THIS store's existing column ids before overwriting so we remove only
-  // its own orphaned shards. (A single shared `lastColIds` would target the
-  // wrong store after a sync on/off switch, orphaning shards — see review #2.)
-  const prev = await store.get('colOrder').catch(() => ({}));
+  serialized.forEach(c => { payload[`col:${c.id}`] = { width: c.width, folderIds: c.folderIds }; });
+  // Read THIS store's existing column ids — and whether the legacy single-key
+  // blob is still present — before overwriting, so we remove only its own
+  // orphaned shards. (A single shared `lastColIds` would target the wrong store
+  // after a sync on/off switch, orphaning shards — see review #2.)
+  const prev = await store.get(['colOrder', 'columns']).catch(() => ({}));
   const prevIds = Array.isArray(prev.colOrder) ? prev.colOrder : [];
   await store.set(payload);
-  // Drop shards for removed columns + the legacy single-key blob, if present.
+  // Drop shards for removed columns, plus the legacy single-key blob the first
+  // time we actually see it. Removing 'columns' on every save (when it no longer
+  // exists) was a wasted write op that permanently halved sync's write-rate
+  // headroom; skip remove() entirely when there's nothing stale (review #10).
   const stale = prevIds.filter(id => !payload.colOrder.includes(id)).map(id => `col:${id}`);
-  stale.push('columns');
-  await store.remove(stale).catch(() => {});
+  if (prev.columns !== undefined) stale.push('columns');
+  if (stale.length) await store.remove(stale).catch(() => {});
 }
 
 async function readLayout(store) {
@@ -2353,20 +2365,28 @@ async function readLayout(store) {
 // to this so an immediate no-op re-persist is skipped (see reloadFromActiveStore
 // and the sync listener — this is what stops two devices ping-ponging their
 // device-local ref serializations back and forth).
-function layoutSignature() {
-  return JSON.stringify({ s: SETTINGS_KEYS.map(k => state[k]), c: serializeColumns() });
+function layoutSignature(serialized = serializeColumns()) {
+  return JSON.stringify({ s: SETTINGS_KEYS.map(k => state[k]), c: serialized });
 }
 
 function persist() {
   // Identical layouts skip the write (avoids churn from refresh() re-persists
-  // and respects sync's write-rate limits).
-  const sig = layoutSignature();
+  // and respects sync's write-rate limits). Serialize the columns once and reuse
+  // for both the signature and the write (review #10).
+  const serialized = serializeColumns();
+  const sig = layoutSignature(serialized);
   if (sig === lastPersistedLayout) return Promise.resolve();
   lastPersistedLayout = sig;
-  return writeLayout(layoutStore()).catch(err => {
-    // e.g. storage.sync per-item / quota / rate limit. Don't lose the change:
-    // allow the next edit to retry; the layout stays correct in memory.
+  const store = layoutStore();
+  return writeLayout(store, serialized).catch(async err => {
+    // e.g. storage.sync per-item (8 KB) / total / write-rate limit. Don't lose
+    // the layout: mirror it to device-local storage so a reload can recover it
+    // (boot falls back to this mirror when the sync store reads empty), and let
+    // the next edit retry the sync write (review #5).
     console.warn('[layout] persist failed:', err?.message || err);
     lastPersistedLayout = null;
+    if (store !== chrome.storage.local) {
+      await writeLayout(chrome.storage.local, serialized).catch(() => {});
+    }
   });
 }

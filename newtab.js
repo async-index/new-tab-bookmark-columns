@@ -2281,13 +2281,13 @@ async function enableSync() {
     // This is the expected "load my layout from my account". If shards are still
     // mid-replication, the onChanged listener finishes adopting them as they land.
     await reloadFromActiveStore();
-  } else {
-    // Cloud is confirmed empty even after the grace re-read → this device seeds
-    // the shared baseline. The first device you enable seeds the shared copy;
-    // others adopt it. To change the shared layout, edit on any synced device.
-    lastPersistedLayout = null;
-    await persist();
   }
+  // Else the cloud is empty: DEFER seeding. We deliberately do NOT write anything
+  // here — enabling sync performs zero cloud writes, so a misread empty cloud can
+  // never overwrite a real layout. This device keeps showing its current layout
+  // (boot falls back to the local copy on reload), and the next genuine edit's
+  // persist() seeds the shared baseline. If a layout turns up late (slow cloud
+  // hydration), the onChanged listener adopts it like any other remote change.
 }
 
 async function disableSync(reset) {

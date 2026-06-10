@@ -93,14 +93,22 @@ document.addEventListener('DOMContentLoaded', async () => {
   // The layout bundle (settings + sharded columns) from the active store (sync
   // if the user opted in, otherwise local).
   let { settings, rawColumns, legacy, hadColOrder, missingShards, tooNew } = await readLayout(layoutStore());
-  // If sync is on but its store came back empty — a seed/write that failed
-  // against sync's quota, or a store wiped elsewhere — fall back to the
-  // device-local mirror persist() keeps on write failures, rather than going on
-  // to seed defaults over the user's real layout (review #5).
-  if (layoutSyncEnabled && !hadColOrder && !rawColumns.length) {
-    const localMirror = await readLayout(chrome.storage.local);
-    if (localMirror.hadColOrder || localMirror.rawColumns.length) {
-      ({ settings, rawColumns, legacy, hadColOrder, missingShards, tooNew } = localMirror);
+  // When sync is on, chrome.storage.sync.get returns Chrome's local cache, which a
+  // just-loaded page (or cold browser start) may not have populated from the cloud
+  // yet — so an empty/partial read here does NOT mean the account is empty. Wait a
+  // grace period and re-read before trusting it, exactly as enableSync does; if
+  // it's still empty, fall back to the device-local mirror persist() keeps on write
+  // failures (review #5). Without this, boot would seed a default over a real layout
+  // that's merely still arriving — the boot twin of the enable-time overwrite.
+  if (layoutSyncEnabled && !tooNew &&
+      (missingShards || (!hadColOrder && !rawColumns.length))) {
+    await new Promise(r => setTimeout(r, SYNC_HYDRATE_GRACE_MS));
+    ({ settings, rawColumns, legacy, hadColOrder, missingShards, tooNew } = await readLayout(layoutStore()));
+    if (!hadColOrder && !rawColumns.length) {
+      const localMirror = await readLayout(chrome.storage.local);
+      if (localMirror.hadColOrder || localMirror.rawColumns.length) {
+        ({ settings, rawColumns, legacy, hadColOrder, missingShards, tooNew } = localMirror);
+      }
     }
   }
   activeStoreTooNew = tooNew; // gate persist() so we never clobber newer data (#8)
@@ -130,7 +138,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   // on another device) must NOT be overwritten with defaults (#2).
   if (!state.columns.length && !hadColOrder) {
     state.columns = defaultColumns(tree[0]);
-    await persist();
+    // Persist the seed only with sync OFF (a safe device-local first-install). With
+    // sync ON we DEFER — never auto-write a default into the cloud, since an empty
+    // read may just be unhydrated; the baseline below stops a background persist,
+    // the next genuine edit seeds, and a layout that arrives late is adopted live.
+    if (!layoutSyncEnabled) await persist();
   }
 
   // Record the loaded layout as the persisted baseline so the first user edit

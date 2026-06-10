@@ -151,6 +151,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   // synced and the change is a genuine remote one (not the echo of our own
   // write — guarded by comparing against our current serialized columns).
   chrome.storage.onChanged.addListener(async (changes, area) => {
+    // The sync toggle is device-local but shared across this device's open new-tab
+    // pages: when one tab flips it, the others must switch their active store too,
+    // or they keep reading/writing the wrong one (#7). The initiating tab already
+    // updated layoutSyncEnabled, so the equality check makes this a no-op there.
+    if (area === 'local' && SYNC_ENABLED_KEY in changes) {
+      const enabled = !!changes[SYNC_ENABLED_KEY].newValue;
+      if (enabled !== layoutSyncEnabled) {
+        layoutSyncEnabled = enabled;
+        const t = document.getElementById('sync-toggle');
+        if (t) t.checked = enabled;
+        await reloadFromActiveStore();
+      }
+      return;
+    }
     if (!layoutSyncEnabled || area !== 'sync') return;
     const settingsChanged = SETTINGS_KEYS.some(k => k in changes);
     const columnsChanged = 'colOrder' in changes
@@ -334,11 +348,6 @@ function resolveRef(ref) {
     node = kids[Math.min(want, kids.length - 1)];
   }
   return node.id;
-}
-
-// Stable string key for a reference (for dedup / future folderOpen·hiddenIds use).
-function refKey(ref) {
-  return `${ref.root || ref.rootId || '?'}#${ref.syncing ?? '?'}#${ref.path.join(' ')}`;
 }
 
 // True when `folderId` is `ancestorId` itself or nested anywhere beneath it.

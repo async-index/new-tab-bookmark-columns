@@ -2231,6 +2231,12 @@ function renderSettingsPanel() {
     closeSettings();
     toggleEditMode(true);
   };
+  // Surface the (otherwise hidden) Cmd/Ctrl+E shortcut, with the platform's key.
+  const editHint = editViewBtn.querySelector('.kbd-hint');
+  if (editHint) {
+    const isMac = /Mac/i.test(navigator.platform || navigator.userAgent || '');
+    editHint.textContent = isMac ? '⌘E' : 'Ctrl+E';
+  }
 
   // Optional cross-device layout sync — per-device, opt-in (see sync-design.md).
   const syncToggle = document.getElementById('sync-toggle');

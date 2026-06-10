@@ -723,6 +723,22 @@ html, body {
   border-color: var(--accent);
 }
 
+/* "Edit columns" carries a dimmed keyboard-shortcut hint (⌘E / Ctrl+E), set
+   per-platform in JS. Flex keeps the label and hint centred together. */
+#edit-view-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.kbd-hint:empty { display: none; }
+.kbd-hint {
+  font-family: var(--font-family);
+  font-size: var(--font-ui);
+  opacity: 0.45;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Info glyph (ⓘ) — shows its description tooltip on hover/focus. The tooltip is
    anchored to the toggle-row (not this glyph) so it spans the panel width. */
 .info-glyph {

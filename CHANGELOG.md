@@ -5,6 +5,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.3.1] — 2026-06-10
 
+### Added
+- The **Edit columns** button now shows its keyboard shortcut (**⌘E** on macOS, **Ctrl+E** elsewhere).
+
 ### Fixed
 - **Sync can no longer overwrite your saved layout with the default.** On a freshly-opened tab (or right after a browser restart) the account's copy may not have downloaded yet; both enabling sync and simply opening a new tab could misread that as "nothing saved" and push this device's default over it. Neither now writes to the cloud on an empty or still-loading read — your layout loads as soon as it arrives, and the cloud is only ever written by a genuine edit.
 - **Synced devices no longer fight over the layout.** Because each device records folder references with some device-local detail, two devices could repeatedly rewrite and re-adopt the same layout — flickering and burning through the sync write quota. An adopted layout is now treated as already-saved, so it settles instead of bouncing back and forth.

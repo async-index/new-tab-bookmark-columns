@@ -85,15 +85,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // The layout bundle (settings + sharded columns) from the active store (sync
   // if the user opted in, otherwise local).
-  const { settings, rawColumns, legacy } = await readLayout(layoutStore());
+  const { settings, rawColumns, legacy, hadColOrder, missingShards } = await readLayout(layoutStore());
   Object.assign(state, settings);
   migratedToSharded = legacy;
   state.columns = rawColumns; // raw refs; hydrated to live node ids after the tree loads
 
-  applyTheme(state.theme);
-  applyDividers(state.dividers);
-  applyHideHandles(state.hideHandles);
-  applyHideFolderDividers(state.hideFolderDividers);
+  applySettings();
 
   const tree = await chrome.bookmarks.getTree();
   allFolders = collectFolders(tree[0]);
@@ -104,13 +101,24 @@ document.addEventListener('DOMContentLoaded', async () => {
   // bookmark tree is loaded. Old node-id-based layouts are upgraded in place.
   if (state.columns.length) {
     state.columns = hydrateColumns(state.columns);
-    if (migratedOldFormat || migratedToSharded) persist(); // upgrade to sharded refs
+    // Upgrade legacy/old formats to sharded refs — but never rewrite a layout we
+    // only partially read (shards still replicating in from sync), or we'd
+    // persist the truncated version back over the complete one (#2).
+    if ((migratedOldFormat || migratedToSharded) && !missingShards) persist();
   }
 
-  if (!state.columns.length) {
+  // Seed the first-install default only when the store holds no layout at all.
+  // An existing colOrder whose shards haven't all arrived (or a layout emptied
+  // on another device) must NOT be overwritten with defaults (#2).
+  if (!state.columns.length && !hadColOrder) {
     state.columns = defaultColumns(tree[0]);
     await persist();
   }
+
+  // Record the loaded layout as the persisted baseline so the first user edit
+  // doesn't trigger a redundant full rewrite (persist() already did this if it
+  // ran above). Skip when shards are missing — don't baseline a partial read.
+  if (lastPersistedLayout === null && !missingShards) lastPersistedLayout = layoutSignature();
 
   pruneHiddenIds();
   renderColumns();
@@ -135,7 +143,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       || Object.keys(changes).some(k => k.startsWith('col:'));
     if (!settingsChanged && !columnsChanged) return;
     const currentSer = JSON.stringify(serializeColumns());
-    const { settings, rawColumns } = await readLayout(chrome.storage.sync);
+    const { settings, rawColumns, missingShards } = await readLayout(chrome.storage.sync);
+    // A column change can arrive before all its shards have replicated, reading
+    // as a truncated layout. Wait for the rest rather than adopt/persist a
+    // partial one (#2) — a later onChanged fires when the shards land.
+    if (columnsChanged && missingShards) return;
     let rendered = false;
     // Apply incoming settings live, independent of the column echo-guard below —
     // a pure settings change from another device still has columns unchanged.
@@ -144,10 +156,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const hiddenChanged = 'showHidden' in changes && settings.showHidden !== state.showHidden;
     if (settingsChanged && SETTINGS_KEYS.some(k => k in changes && settings[k] !== state[k])) {
       Object.assign(state, settings);
-      applyTheme(state.theme);
-      applyDividers(state.dividers);
-      applyHideHandles(state.hideHandles);
-      applyHideFolderDividers(state.hideFolderDividers);
+      applySettings();
       syncSettingsControls();
     }
     if (columnsChanged) {
@@ -158,8 +167,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         ({ id: c.id, width: c.width, folderIds: c.folderIds })));
       if (incomingSer !== currentSer) {     // not our own echo / already current
         state.columns = hydrateColumns(rawColumns);
+        pruneHiddenIds(); // adopt path must drop hidden-ids for now-absent columns (#4)
         renderColumns();
         rendered = true;
+        // Mark the adopted layout as our persisted baseline so the no-op
+        // re-persist from the next bookmark event is skipped. Without this each
+        // device keeps rewriting its own device-local ref serialization and the
+        // two ping-pong, burning sync's write quota (#1/#3).
+        lastPersistedLayout = layoutSignature();
       }
     }
     // showHidden is applied at render time (not via a CSS class), so a remote
@@ -2230,13 +2245,12 @@ async function disableSync(reset) {
 async function reloadFromActiveStore() {
   const { settings, rawColumns } = await readLayout(layoutStore());
   Object.assign(state, settings);
-  applyTheme(state.theme);
-  applyDividers(state.dividers);
-  applyHideHandles(state.hideHandles);
-  applyHideFolderDividers(state.hideFolderDividers);
+  applySettings();
   state.columns = hydrateColumns(rawColumns);
   pruneHiddenIds(); // #8: adopt path must drop hidden-ids for now-absent columns
-  lastPersistedLayout = null;
+  // Baseline the adopted layout so the next no-op persist is skipped (avoids the
+  // ping-pong described in #1/#3); a real local edit still changes the signature.
+  lastPersistedLayout = layoutSignature();
   renderColumns();
 }
 
@@ -2277,6 +2291,16 @@ function applyHideFolderDividers(on) {
   document.getElementById('columns-container').classList.toggle('hide-folder-dividers', on);
 }
 
+// Apply every visual setting from `state` (theme + the divider/handle classes).
+// Shared by boot, the live-sync listener, and reloadFromActiveStore so a new
+// setting only needs wiring in one place.
+function applySettings() {
+  applyTheme(state.theme);
+  applyDividers(state.dividers);
+  applyHideHandles(state.hideHandles);
+  applyHideFolderDividers(state.hideFolderDividers);
+}
+
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
 
@@ -2306,23 +2330,37 @@ async function readLayout(store) {
   const head = await store.get([...SETTINGS_KEYS, 'colOrder', 'columns']);
   const settings = {};
   SETTINGS_KEYS.forEach(k => { if (head[k] != null) settings[k] = head[k]; });
-  let rawColumns = [], legacy = false;
+  let rawColumns = [], legacy = false, hadColOrder = false, missingShards = false;
   if (Array.isArray(head.colOrder)) {                       // sharded (schema 3)
+    hadColOrder = true;
     const cd = head.colOrder.length ? await store.get(head.colOrder.map(id => `col:${id}`)) : {};
     rawColumns = head.colOrder
       .map(id => { const c = cd[`col:${id}`]; return c ? { id, width: c.width, folderIds: c.folderIds } : null; })
       .filter(Boolean);
+    // Some col:<id> shards listed in colOrder didn't come back — on sync this
+    // means replication is still in flight (keys propagate independently). The
+    // caller must not seed defaults over, or persist a truncated copy of, this.
+    missingShards = rawColumns.length < head.colOrder.length;
   } else if (Array.isArray(head.columns)) {                 // legacy single key
     rawColumns = head.columns;
     legacy = true;
   }
-  return { settings, rawColumns, legacy };
+  return { settings, rawColumns, legacy, hadColOrder, missingShards };
+}
+
+// Format-independent signature of the persisted layout (settings + columns).
+// persist() skips writes when it's unchanged; adopt paths set lastPersistedLayout
+// to this so an immediate no-op re-persist is skipped (see reloadFromActiveStore
+// and the sync listener — this is what stops two devices ping-ponging their
+// device-local ref serializations back and forth).
+function layoutSignature() {
+  return JSON.stringify({ s: SETTINGS_KEYS.map(k => state[k]), c: serializeColumns() });
 }
 
 function persist() {
-  // Format-independent signature, so identical layouts skip the write (avoids
-  // churn from refresh() re-persists and respects sync's write-rate limits).
-  const sig = JSON.stringify({ s: SETTINGS_KEYS.map(k => state[k]), c: serializeColumns() });
+  // Identical layouts skip the write (avoids churn from refresh() re-persists
+  // and respects sync's write-rate limits).
+  const sig = layoutSignature();
   if (sig === lastPersistedLayout) return Promise.resolve();
   lastPersistedLayout = sig;
   return writeLayout(layoutStore()).catch(err => {

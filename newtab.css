@@ -496,8 +496,21 @@ html, body {
   background: transparent;
 }
 
-.dividers .subfolder-group:not(:last-child) {
-  border-bottom: 1px solid var(--border);
+/* Match the bookmark-item divider above: an absolutely-positioned line rather
+   than a real border-bottom. A border adds 1px to the subfolder-group's box,
+   so toggling dividers on made folder rows taller than bookmark rows (whose
+   divider is a zero-height ::after) and shifted the whole list. This adds no
+   layout height. `:not(.drop-after)` yields the ::after to the drag drop
+   indicator (which also uses ::after) while a folder is being dropped. */
+.dividers .subfolder-group:not(:last-child):not(.drop-after)::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: var(--border);
+  pointer-events: none;
 }
 
 .bookmark-favicon {
@@ -1276,4 +1289,31 @@ html, body {
 /* Hide the settings toggle while editing so the two don't crowd each other. */
 .edit-mode #settings-toggle {
   display: none;
+}
+
+/* ── Undo toast ───────────────────────────────────────────────────────────────
+   Transient confirmation shown when Cmd/Ctrl+Z runs (or when there's nothing to
+   undo). Bottom-centre, fades in/out; non-interactive. */
+.undo-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(6px);
+  padding: 7px 14px;
+  border-radius: 7px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font-family);
+  font-size: var(--font-ui);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  z-index: 1000;
+}
+
+.undo-toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
 }

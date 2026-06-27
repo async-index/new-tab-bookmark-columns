@@ -2,7 +2,7 @@
 
 A Chrome extension that replaces the new tab page with a clean, customizable bookmark viewer organized in resizable columns.
 
-**Version 1.3.1** — opt-in cross-device sync of your column layout and display settings via your Google account (`chrome.storage.sync`).
+**Version 1.4.0** — undo your last bookmark edit with ⌘Z (Ctrl+Z elsewhere); opt-in cross-device sync of your column layout and display settings via your Google account (`chrome.storage.sync`).
 
 ![New Tab Bookmark Columns](github-screenshot.png)
 
@@ -25,7 +25,8 @@ A Chrome extension that replaces the new tab page with a clean, customizable boo
 - **Cross-device sync (opt-in)** — a **Sync** settings toggle (off by default) shares your column layout and display settings across the devices where you enable it, via Chrome's `chrome.storage.sync` (your Google account); per-device by design, with a keep-or-reset prompt when you turn it off. Folders are identified by a re-resolvable reference (root type, account/local subtree, title path), not raw node IDs, so the layout survives cross-device ID differences
 - **Favicons** — apple-touch-icon → Chrome favicon fallback, domain-level cache, persisted in `chrome.storage.local`
 - **Inline confirmations** for destructive actions (delete folder, delete bookmark)
-- **Keyboard** — `Cmd/Ctrl+E` toggles edit mode; `Esc` closes the settings panel, the open `+ Add item` menu, or exits edit mode
+- **Undo** — `Cmd/Ctrl+Z` reverses your last rename, move/reorder, or delete made from the page (restoring a deleted folder with its contents); press repeatedly to step back through recent edits
+- **Keyboard** — `Cmd/Ctrl+E` toggles edit mode; `Cmd/Ctrl+Z` undoes your last bookmark edit; `Esc` closes the settings panel, the open `+ Add item` menu, or exits edit mode
 
 ---
 
@@ -56,7 +57,7 @@ No remote requests are made beyond the per-domain `apple-touch-icon.png` probe u
 - Chrome Extension Manifest V3
 - Vanilla JS — no frameworks, no build step
 - CSS custom properties for the full design token system (color, typography, spacing)
-- `chrome.bookmarks` for tree reads and `move`/`update`/`remove`
+- `chrome.bookmarks` for tree reads and `move`/`update`/`remove`/`create` (the last backs undo)
 - `chrome.storage.local` for device-local state (favicon cache, sync opt-in flag, folder open/closed, hidden IDs); `chrome.storage.sync` for the layout + display settings when sync is enabled, with a `storage.onChanged` listener for live cross-device updates
 - HTML5 Drag and Drop API + FLIP animations for column / folder / bookmark reorder
 - `data-theme` attribute on `<html>` for light/dark switching; system theme uses `window.matchMedia` with a live listener

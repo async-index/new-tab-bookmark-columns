@@ -57,6 +57,12 @@ let resolvedRefs = new Map();   // live node id -> the ref it resolved from, so 
                                 // vanished id can rebind across sync id churn (#9)
 let unresolvedSeq = 0;
 let migratedOldFormat = false;  // set during hydrate when old node-id data was upgraded
+// Per-install id, device-local (never synced). Stamped into each folderRef as a
+// device-local node-id hint so a folder renamed/moved while no new-tab page was
+// open to re-persist still resolves on THIS device (node ids survive rename/move
+// /restart within a profile). On other devices the id won't match, so resolution
+// falls back to the title-path ref — keeping cross-device behavior unchanged.
+let deviceId = null;
 let lastPersistedLayout = null; // JSON of last write, to skip redundant persists
 let migratedToSharded = false;  // set on load when a legacy single-`columns` key was read
 let activeStoreTooNew = false;  // active store holds a newer layoutSchema than we grok (#8)
@@ -80,8 +86,10 @@ function layoutStore() {
 document.addEventListener('DOMContentLoaded', async () => {
   // Device-local keys first — including the sync toggle, which decides where the
   // layout bundle lives.
-  const local = await chrome.storage.local.get([SYNC_ENABLED_KEY, 'faviconCache', 'folderOpen', 'hiddenIds']);
+  const local = await chrome.storage.local.get([SYNC_ENABLED_KEY, 'faviconCache', 'folderOpen', 'hiddenIds', 'deviceId']);
   layoutSyncEnabled = !!local[SYNC_ENABLED_KEY];
+  deviceId = local.deviceId || crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+  if (!local.deviceId) chrome.storage.local.set({ deviceId });
   if (local.faviconCache)        faviconCache      = local.faviconCache;
   if (local.folderOpen)          folderOpen        = local.folderOpen;
   if (local.hiddenIds && !Array.isArray(local.hiddenIds)) {
@@ -329,6 +337,8 @@ function folderRef(node) {
     rootId: container?.id ?? null,          // fallback when folderType is unavailable
     path,                                    // titles, container→folder; [] if node IS the container
     idx,                                     // sibling index per path segment (same-named disambiguation)
+    id: node.id,                             // device-local node-id hint (see `device`)
+    device: deviceId,                        // install id; trust `id` only when it matches this device
   };
 }
 
@@ -339,6 +349,14 @@ function resolveRef(ref) {
   // or newer-schema sync data) must resolve to null, not throw mid-hydrate and
   // blank the page (#8).
   if (!ref || typeof ref !== 'object' || !Array.isArray(ref.path)) return null;
+  // Device-local fast path: if this ref was written on THIS install and its node
+  // id still exists, trust it directly. Node ids survive rename/move/restart, so
+  // this resolves a folder that was renamed while no new-tab page was open to
+  // re-persist the title-path. Skipped cross-device (id won't match), so a stale
+  // hint never binds to an unrelated same-id folder on another device.
+  if (ref.device && ref.device === deviceId && typeof ref.id === 'string' && folderById(ref.id)) {
+    return ref.id;
+  }
   const containers = childrenFolders('0');
   let container = null;
   if (ref.root) {
@@ -386,6 +404,13 @@ function hydrateItem(item) {
   if (item && typeof item === 'object') {                    // new: a reference
     const id = resolveRef(item);
     if (id) { resolvedRefs.set(id, item); return id; } // remember the ref for #9
+    // Unresolvable. A ref this device last wrote (its device id matches) whose
+    // folder is now gone was deleted here — a rename/move would have been recovered
+    // by the device-local id in resolveRef — so drop the slot instead of leaving a
+    // dead "not found" placeholder. Keep the placeholder only for refs that may
+    // still live on another synced device (foreign, or older refs lacking the
+    // device-local id) so sync doesn't lose them.
+    if (item.device === deviceId) return null;
     const marker = `${UNRESOLVED_PREFIX}${unresolvedSeq++}`; // can't resolve here
     unresolvedRefs.set(marker, item);
     return marker;
@@ -568,7 +593,7 @@ async function flushPendingItemDrop() {
 
   const nodeId = draggedItem.node.id;
   clearDropIndicators(cont);
-  await chrome.bookmarks.move(nodeId, { parentId: folderId, index: targetIdx });
+  await undoableMove(nodeId, { parentId: folderId, index: targetIdx });
   refresh();
 }
 
@@ -1701,7 +1726,7 @@ function makeFolderGroup(folder, depth = 0, siblings = null, idx = 0, colId = nu
           label: 'Move up',
           disabled: idx === 0,
           action: async () => {
-            await chrome.bookmarks.move(folder.id, { index: siblings[idx - 1].index });
+            await undoableMove(folder.id, { index: siblings[idx - 1].index });
             refresh();
           },
         },
@@ -1709,7 +1734,7 @@ function makeFolderGroup(folder, depth = 0, siblings = null, idx = 0, colId = nu
           label: 'Move down',
           disabled: idx === siblings.length - 1,
           action: async () => {
-            await chrome.bookmarks.move(folder.id, { index: siblings[idx + 1].index + 1 });
+            await undoableMove(folder.id, { index: siblings[idx + 1].index + 1 });
             refresh();
           },
         },
@@ -1718,7 +1743,7 @@ function makeFolderGroup(folder, depth = 0, siblings = null, idx = 0, colId = nu
         null,
         {
           label: 'Delete', danger: true, confirm: true, action: async () => {
-            await chrome.bookmarks.removeTree(folder.id);
+            await undoableRemove(folder.id, 'delete folder');
             refresh();
           },
         },
@@ -1814,7 +1839,7 @@ function renderFolderContents(folder, container, depth, colId) {
     }
 
     pendingItemDrop = null; // drop fired and is processing — no dragend fallback needed
-    await chrome.bookmarks.move(draggedItem.node.id, { parentId: folder.id, index: targetIdx });
+    await undoableMove(draggedItem.node.id, { parentId: folder.id, index: targetIdx });
     refresh();
   });
 
@@ -1879,7 +1904,7 @@ function makeBookmarkItem(bm, folder, siblings, idx, colId) {
         label: 'Move up',
         disabled: idx === 0,
         action: async () => {
-          await chrome.bookmarks.move(bm.id, { index: siblings[idx - 1].index });
+          await undoableMove(bm.id, { index: siblings[idx - 1].index });
           refresh();
         },
       },
@@ -1887,7 +1912,7 @@ function makeBookmarkItem(bm, folder, siblings, idx, colId) {
         label: 'Move down',
         disabled: idx === siblings.length - 1,
         action: async () => {
-          await chrome.bookmarks.move(bm.id, { index: siblings[idx + 1].index + 1 });
+          await undoableMove(bm.id, { index: siblings[idx + 1].index + 1 });
           refresh();
         },
       },
@@ -1896,7 +1921,7 @@ function makeBookmarkItem(bm, folder, siblings, idx, colId) {
       null,
       {
         label: 'Delete', danger: true, confirm: true, action: async () => {
-          await chrome.bookmarks.remove(bm.id);
+          await undoableRemove(bm.id, 'delete bookmark');
           refresh();
         },
       },
@@ -2007,6 +2032,7 @@ function showCtxMenu(x, y, items) {
 
 function startRename(bm, linkEl) {
   const titleEl = linkEl.querySelector('.bookmark-title');
+  if (!titleEl) return; // a rename is already open on this item
   const original = titleEl.textContent;
 
   const input = document.createElement('input');
@@ -2016,23 +2042,46 @@ function startRename(bm, linkEl) {
   input.focus();
   input.select();
 
+  // The field lives inside the bookmark's <a href>, so clicking into it to move
+  // the cursor would otherwise activate the link and navigate away (cursor
+  // placement happens on mousedown, so cancelling the click's default still
+  // lets the caret move). Cleared on commit/escape.
+  const blockNav = e => e.preventDefault();
+  linkEl.addEventListener('click', blockNav);
+
+  // The <a> is draggable, so a mouse drag inside the field would start dragging
+  // the bookmark instead of selecting text. Suspend dragging while editing.
+  linkEl.draggable = false;
+
+  function teardown() {
+    linkEl.removeEventListener('click', blockNav);
+    linkEl.draggable = true;
+  }
+
   let committed = false;
   async function commit() {
     if (committed) return;
     committed = true;
+    teardown();
     const newTitle = input.value.trim() || original;
-    await chrome.bookmarks.update(bm.id, { title: newTitle });
+    if (newTitle !== original) await undoableUpdate(bm.id, { title: newTitle }, 'rename');
     refresh();
   }
 
   input.addEventListener('keydown', e => {
+    e.stopPropagation(); // keep Escape/shortcuts from reaching global handlers
     if (e.key === 'Enter')  { e.preventDefault(); commit(); }
-    if (e.key === 'Escape') { committed = true; input.replaceWith(titleEl); }
+    if (e.key === 'Escape') {
+      committed = true;
+      teardown();
+      input.replaceWith(titleEl);
+    }
   });
   input.addEventListener('blur', commit);
 }
 
 function startFolderRename(folder, nameEl) {
+  if (!nameEl?.isConnected) return; // a rename is already open on this folder
   const original = nameEl.textContent;
 
   const input = document.createElement('input');
@@ -2042,18 +2091,35 @@ function startFolderRename(folder, nameEl) {
   input.focus();
   input.select();
 
+  // This field sits inside a clickable + draggable folder header — and the same
+  // function renames both subfolders and top-level folders. Keep mouse activity
+  // local to the input so it doesn't:
+  //   - toggle a subfolder open/closed (header click), or
+  //   - arm a top-level folder drag (its label arms dragging on mousedown), or
+  //   - start a native subfolder-group drag mid-text-selection.
+  // Resolve the group from `input` (now attached) — `nameEl` is detached after
+  // replaceWith, so nameEl.closest() would return null.
+  input.addEventListener('mousedown', e => e.stopPropagation());
+  input.addEventListener('click', e => e.stopPropagation());
+  const group = input.closest('.subfolder-group, .folder-group');
+  const wasDraggable = group?.draggable ?? false;
+  if (group) group.draggable = false;
+  const restoreDrag = () => { if (group) group.draggable = wasDraggable; };
+
   let committed = false;
   async function commit() {
     if (committed) return;
     committed = true;
+    restoreDrag();
     const newTitle = input.value.trim() || original;
-    await chrome.bookmarks.update(folder.id, { title: newTitle });
+    if (newTitle !== original) await undoableUpdate(folder.id, { title: newTitle }, 'rename');
     refresh();
   }
 
   input.addEventListener('keydown', e => {
+    e.stopPropagation(); // keep Escape/shortcuts from reaching global handlers
     if (e.key === 'Enter')  { e.preventDefault(); commit(); }
-    if (e.key === 'Escape') { committed = true; input.replaceWith(nameEl); }
+    if (e.key === 'Escape') { committed = true; restoreDrag(); input.replaceWith(nameEl); }
   });
   input.addEventListener('blur', commit);
 }
@@ -2097,6 +2163,131 @@ function makeHandle(leftColIdx) {
   return handle;
 }
 
+// ─── Undo ─────────────────────────────────────────────────────────────────────
+//
+// A bounded stack of inverse operations for the bookmark edits made from this
+// page — rename, move/reorder, and delete. Cmd/Ctrl+Z runs the most recent
+// inverse. The global chrome.bookmarks listeners (onCreated/onChanged/onMoved/
+// onRemoved) already repaint the UI, so each inverse only has to touch the
+// bookmarks tree.
+//
+// Notes & limits:
+//  - Undoing a delete re-creates the node(s) with NEW ids (the originals are
+//    gone for good). The result is visually identical; per-id state like
+//    folderOpen simply starts fresh.
+//  - Move undo restores the node before its old next-sibling (re-resolved
+//    against the live tree), so same-folder reorders come back to the exact
+//    slot. If that sibling was since deleted, the node re-appends.
+//  - Scope is bookmark edits only. Layout actions (hide/show, add/remove
+//    column, resize) are reversible through the same controls and aren't on
+//    this stack.
+//  - Redo is intentionally omitted — re-doing a delete would chase a node id
+//    that changed on undo. Repeat the action instead.
+
+const undoStack = [];
+const UNDO_LIMIT = 50;
+
+function pushUndo(entry) {
+  undoStack.push(entry);
+  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+}
+
+async function performUndo() {
+  const entry = undoStack.pop();
+  if (!entry) { showToast('Nothing to undo'); return; }
+  try {
+    await entry.undo();
+    showToast(entry.label ? `Undid ${entry.label}` : 'Undone');
+  } catch (err) {
+    console.warn('Undo failed', err);
+    showToast('Undo failed');
+  }
+}
+
+// Re-create a captured subtree (from chrome.bookmarks.getSubTree) under
+// parentId at index. Leaf bookmarks have no `children`; folders recurse.
+async function recreateSubtree(node, parentId, index) {
+  const created = await chrome.bookmarks.create({
+    parentId,
+    index,
+    title: node.title,
+    ...(node.url ? { url: node.url } : {}),
+  });
+  if (node.children) {
+    for (let i = 0; i < node.children.length; i++) {
+      await recreateSubtree(node.children[i], created.id, i);
+    }
+  }
+  return created;
+}
+
+// Mutation wrappers: perform the edit, then record its inverse on the stack.
+// Used at every bookmark-mutating call site so undo coverage stays in one place.
+
+async function undoableMove(nodeId, dest, label = 'move') {
+  const [n] = await chrome.bookmarks.get(nodeId);
+  const parentId = n.parentId;
+  // Anchor the restore to the node that *followed* this one, rather than to a
+  // raw index. Restoring by absolute index hits Chrome's same-folder quirk
+  // (the node is removed before the index is applied), which lands a re-ordered
+  // last item one slot short. The next-sibling anchor is recomputed against the
+  // live tree at undo time and sidesteps that.
+  const before = await chrome.bookmarks.getChildren(parentId);
+  const pos = before.findIndex(s => s.id === nodeId);
+  const nextId = pos >= 0 ? (before[pos + 1]?.id ?? null) : null;
+
+  await chrome.bookmarks.move(nodeId, dest);
+
+  pushUndo({
+    label,
+    undo: async () => {
+      const sibs = await chrome.bookmarks.getChildren(parentId);
+      // Drop the node back immediately before its old next-sibling; if it was
+      // last (or that sibling is gone), re-append. `index = anchor position`
+      // places it just before the anchor under Chrome's move semantics.
+      let index;
+      if (nextId == null) {
+        index = sibs.length;
+      } else {
+        const ni = sibs.findIndex(s => s.id === nextId);
+        index = ni === -1 ? sibs.length : ni;
+      }
+      await chrome.bookmarks.move(nodeId, { parentId, index });
+    },
+  });
+}
+
+async function undoableUpdate(nodeId, changes, label = 'edit') {
+  const [n] = await chrome.bookmarks.get(nodeId);
+  const prev = {};
+  for (const k of Object.keys(changes)) prev[k] = n[k];
+  await chrome.bookmarks.update(nodeId, changes);
+  pushUndo({ label, undo: () => chrome.bookmarks.update(nodeId, prev) });
+}
+
+async function undoableRemove(nodeId, label = 'delete') {
+  const [sub] = await chrome.bookmarks.getSubTree(nodeId);
+  const { parentId, index } = sub;
+  if (sub.children) await chrome.bookmarks.removeTree(nodeId);
+  else await chrome.bookmarks.remove(nodeId);
+  pushUndo({ label, undo: () => recreateSubtree(sub, parentId, index) });
+}
+
+let toastEl, toastTimer;
+function showToast(msg) {
+  if (!toastEl) {
+    toastEl = document.createElement('div');
+    toastEl.className = 'undo-toast';
+    document.body.appendChild(toastEl);
+  }
+  toastEl.textContent = msg;
+  // Reflow so re-triggering the transition restarts the fade for a fresh toast.
+  void toastEl.offsetWidth;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 1600);
+}
+
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
 function setupSettings() {
@@ -2128,6 +2319,18 @@ function setupSettings() {
       e.preventDefault();
       if (!editMode) closeSettings();
       toggleEditMode(!editMode);
+    }
+  });
+
+  // Cmd/Ctrl+Z undoes the last bookmark edit (rename/move/delete) made here.
+  // Skip while typing (rename input, search box) so native text undo wins.
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey &&
+        (e.key === 'z' || e.key === 'Z')) {
+      const t = e.target;
+      if (t && (t.matches?.('input, textarea, select') || t.isContentEditable)) return;
+      e.preventDefault();
+      performUndo();
     }
   });
 

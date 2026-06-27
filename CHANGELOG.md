@@ -3,6 +3,17 @@
 All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.4.0] — 2026-06-27
+
+### Added
+- **Undo your last bookmark edit with ⌘Z (Ctrl+Z elsewhere).** Renaming, reordering, moving between folders, or deleting a bookmark or folder from the new-tab page can now be reversed — press it repeatedly to step back through recent edits. Deleting a folder and undoing restores the folder with all its contents. A brief toast confirms each undo (or tells you there's nothing left to undo). Undo covers bookmark edits; layout changes such as hiding items or resizing columns are reversed through their own controls.
+
+### Fixed
+- **Renaming a bookmark or folder now lets you click into the field and select text with the mouse.** Clicking to reposition the cursor used to open the bookmark (or collapse the folder), and dragging to select text started dragging the item instead. The rename field now keeps clicks and drags local, for bookmarks, subfolders, and top-level folders alike; Esc no longer also closes the settings panel or exits edit mode while you're renaming.
+- **Turning on bookmark dividers no longer nudges the list.** Folder rows drew their divider as a real border, which made them a pixel taller than bookmark rows and shifted the whole column when dividers were toggled on. The divider is now drawn without adding row height, so the list stays put.
+- **Renaming a bookmark folder in Chrome no longer drops it from its column.** Columns remember folders by their title path so the same layout works across devices, but that path goes stale if you rename (or move) a folder while no new-tab page is open to catch the change. Each folder is now also remembered by a device-local id that survives renames, moves, and restarts, so the column keeps it on this device; other devices still fall back to the title path.
+- **Deleting a bookmark folder in Chrome no longer leaves a dead "Not found on this device" slot in the column.** A slot is now removed once we can tell the folder was deleted on this device, while a folder that only exists on another synced device still shows the placeholder so sync doesn't lose it.
+
 ## [1.3.1] — 2026-06-10
 
 ### Added

@@ -30,6 +30,14 @@ let allBookmarks = []; // flat list of all URL bookmarks (for stats widget)
 let recentBookmarks = []; // most-recently-added URL bookmarks (for the widget)
 let faviconCache = {}; // { [domain]: url | "chrome" | "none" }
 let hiddenIds = {}; // { [colId: string]: Set<string> } — per-column hidden IDs
+// Phase 6 (hidden-state sync): the refs behind hidden entries. hiddenRefs maps
+// a live node id -> the ref it was hydrated from / last serialized to, so an id
+// that churns (sync id churn, account migration) can be re-bound instead of
+// dropped — the #9 analog for hidden items. unresolvedHidden stashes per-column
+// refs that don't resolve on THIS device (hidden on another synced device);
+// they're preserved through persists and retried on refresh.
+const hiddenRefs = new Map();      // nodeId -> ref (folder or bookmark ref)
+let unresolvedHidden = {};         // { [colId: string]: ref[] }
 let draggedItem = null;  // { node, folderId } during drag (bookmark or subfolder)
 // Snapshotted by container.dragover; used as a fallback in source.dragend if
 // the drop event didn't fire for some reason (e.g. cursor moved at the last
@@ -92,15 +100,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (!local.deviceId) chrome.storage.local.set({ deviceId });
   if (local.faviconCache)        faviconCache      = local.faviconCache;
   if (local.folderOpen)          folderOpen        = local.folderOpen;
-  if (local.hiddenIds && !Array.isArray(local.hiddenIds)) {
-    for (const [colId, ids] of Object.entries(local.hiddenIds)) {
+  // Phase 6: the legacy device-local hidden key (pre-1.5 format, raw node ids).
+  // Loaded so pre-migration boots keep their hidden state (schema-3 shards carry
+  // no hidden info); the migration below folds it into the layout bundle and
+  // retires the key.
+  const legacyHidden = (local.hiddenIds && !Array.isArray(local.hiddenIds)) ? local.hiddenIds : null;
+  if (legacyHidden) {
+    for (const [colId, ids] of Object.entries(legacyHidden)) {
       hiddenIds[colId] = new Set(ids);
     }
   }
 
   // The layout bundle (settings + sharded columns) from the active store (sync
   // if the user opted in, otherwise local).
-  let { settings, rawColumns, legacy, hadColOrder, missingShards, tooNew } = await readLayout(layoutStore());
+  let { settings, rawColumns, legacy, hadColOrder, missingShards, tooNew, schemaOutdated } = await readLayout(layoutStore());
   // When sync is on, chrome.storage.sync.get returns Chrome's local cache, which a
   // just-loaded page (or cold browser start) may not have populated from the cloud
   // yet — so an empty/partial read here does NOT mean the account is empty. Wait a
@@ -111,11 +124,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (layoutSyncEnabled && !tooNew &&
       (missingShards || (!hadColOrder && !rawColumns.length))) {
     await new Promise(r => setTimeout(r, SYNC_HYDRATE_GRACE_MS));
-    ({ settings, rawColumns, legacy, hadColOrder, missingShards, tooNew } = await readLayout(layoutStore()));
+    ({ settings, rawColumns, legacy, hadColOrder, missingShards, tooNew, schemaOutdated } = await readLayout(layoutStore()));
     if (!hadColOrder && !rawColumns.length) {
       const localMirror = await readLayout(chrome.storage.local);
       if (localMirror.hadColOrder || localMirror.rawColumns.length) {
-        ({ settings, rawColumns, legacy, hadColOrder, missingShards, tooNew } = localMirror);
+        ({ settings, rawColumns, legacy, hadColOrder, missingShards, tooNew, schemaOutdated } = localMirror);
       }
     }
   }
@@ -135,10 +148,28 @@ document.addEventListener('DOMContentLoaded', async () => {
   // bookmark tree is loaded. Old node-id-based layouts are upgraded in place.
   if (state.columns.length) {
     state.columns = hydrateColumns(state.columns);
+    // Phase 6 migration: fold legacy hidden entries into the hydrated sets.
+    // Union, not replace — a shard that already carries hidden state (another
+    // device migrated first) must not wipe this device's never-synced extras.
+    if (legacyHidden) {
+      for (const [colId, ids] of Object.entries(legacyHidden)) {
+        if (!state.columns.some(c => c.id === colId)) continue;
+        const set = hiddenIds[colId] ?? (hiddenIds[colId] = new Set());
+        ids.forEach(id => set.add(id));
+      }
+    }
     // Upgrade legacy/old formats to sharded refs — but never rewrite a layout we
     // only partially read (shards still replicating in from sync), or we'd
     // persist the truncated version back over the complete one (#2).
-    if ((migratedOldFormat || migratedToSharded) && !missingShards) persist();
+    // schemaOutdated/legacyHidden (Phase 6) also migrate EAGERLY, so hidden
+    // state lands in the shards at first boot, not at the first user edit.
+    if ((migratedOldFormat || migratedToSharded || schemaOutdated || legacyHidden) && !missingShards) {
+      await persist();
+      // Retire the legacy key only after a successful write (persist resets the
+      // baseline to null on failure) — its content now lives in the layout
+      // bundle, and the §10.2 backup holds the pre-migration copy.
+      if (legacyHidden && lastPersistedLayout !== null) chrome.storage.local.remove('hiddenIds');
+    }
   }
 
   // Seed the first-install default only when the store holds no layout at all.
@@ -219,7 +250,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // that mutates the shared unresolved-ref map (review #9). Hydrate only when
       // we actually adopt. rawColumns are already in serialized (ref) form.
       const incomingSer = JSON.stringify((rawColumns || []).map(c =>
-        ({ id: c.id, width: c.width, folderIds: c.folderIds })));
+        ({ id: c.id, width: c.width, folderIds: c.folderIds, hidden: c.hidden })));
       if (incomingSer !== currentSer) {     // not our own echo / already current
         state.columns = hydrateColumns(rawColumns);
         pruneHiddenIds(); // adopt path must drop hidden-ids for now-absent columns (#4)
@@ -280,6 +311,14 @@ function bookmarksBar(containers) {
   const bars = containers.filter(c => c.folderType === 'bookmarks-bar');
   return bars.find(c => c.syncing) || bars[0]
       || containers.find(c => c.id === '1') || containers[0] || null;
+}
+
+// The "Other bookmarks" container, same preference order as bookmarksBar():
+// account (syncing) subtree first, then folderType, legacy id "2" on old Chrome.
+function otherBookmarks(containers) {
+  const others = containers.filter(c => c.folderType === 'other');
+  return others.find(c => c.syncing) || others[0]
+      || containers.find(c => c.id === '2') || null;
 }
 
 function defaultColumns(root) {
@@ -384,6 +423,45 @@ function resolveRef(ref) {
   return node.id;
 }
 
+// ─── Bookmark references (Phase 6: cross-device identity for hidden items) ────
+// Hidden items can be individual bookmarks, which folderRef can't describe (it
+// walks the folder tree). A bookmark ref is the PARENT folder's ref plus the
+// bookmark's url + title, with the device-local id hint pointing at the bookmark
+// itself. The presence of `url` is what distinguishes the two ref kinds.
+
+const isBookmarkRef = ref =>
+  !!ref && typeof ref === 'object' && typeof ref.url === 'string';
+
+function bookmarkRef(node) {
+  const parent = folderById(node.parentId);
+  if (!parent) return null; // orphan (shouldn't happen in a live tree)
+  const ref = folderRef(parent);
+  ref.url = node.url;
+  ref.title = node.title || '';
+  ref.id = node.id;
+  ref.device = deviceId;
+  return ref;
+}
+
+// Resolve to a live bookmark id on THIS device, or null. Reuses resolveRef for
+// the parent: the ref's path walks to the parent folder, and its folder-side
+// fast path can't misfire because the id hint is a bookmark id, which never
+// matches a folder on the device that wrote it.
+function resolveBookmarkRef(ref) {
+  if (!isBookmarkRef(ref) || !Array.isArray(ref.path)) return null;
+  if (ref.device && ref.device === deviceId && typeof ref.id === 'string' &&
+      allBookmarks.some(b => b.id === ref.id)) {
+    return ref.id;
+  }
+  const parentId = resolveRef(ref);
+  if (parentId == null) return null;
+  const byUrl = allBookmarks
+    .filter(b => b.parentId === parentId && b.url === ref.url)
+    .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+  if (!byUrl.length) return null;
+  return (byUrl.find(b => (b.title || '') === ref.title) || byUrl[0]).id;
+}
+
 // True when `folderId` is `ancestorId` itself or nested anywhere beneath it.
 // Used to forbid dropping a folder into its own subtree (chrome.bookmarks.move
 // rejects such cycles).
@@ -423,11 +501,14 @@ function hydrateColumns(rawColumns) {
   resolvedRefs.clear();
   unresolvedSeq = 0;
   migratedOldFormat = false;
-  return (rawColumns || []).map(col => ({
-    id: col.id,
-    width: col.width,
-    folderIds: (col.folderIds || []).map(hydrateItem).filter(x => x != null),
-  }));
+  return (rawColumns || []).map(col => {
+    hydrateHidden(col.id, col.hidden); // no-op for pre-Phase-6 shards (no field)
+    return {
+      id: col.id,
+      width: col.width,
+      folderIds: (col.folderIds || []).map(hydrateItem).filter(x => x != null),
+    };
+  });
 }
 
 // PERSIST: an in-memory item -> its stored form (reference | widget | preserved ref).
@@ -446,6 +527,7 @@ function serializeColumns() {
     id: col.id,
     width: col.width,
     folderIds: serializeFolderIds(col.folderIds),
+    hidden: serializeHidden(col.id),
   }));
 }
 
@@ -496,6 +578,7 @@ function makeFavicon(url) {
   const img = document.createElement('img');
   img.className = 'bookmark-favicon';
   img.alt = '';
+  img.loading = 'lazy'; // offscreen favicons (collapsed folders, below fold) defer
 
   const chromeUrl = `chrome-extension://${chrome.runtime.id}/_favicon/?pageUrl=${encodeURIComponent(url)}&size=32`;
   const appleUrl  = `https://${domain}/apple-touch-icon.png`;
@@ -536,16 +619,53 @@ function makeFavicon(url) {
   return img;
 }
 
-function persistFaviconCache() {
-  chrome.storage.local.set({ faviconCache });
+// Debounced: on a cold first load every uncached domain resolves in a burst,
+// and each un-debounced write structured-clones the entire growing cache.
+const persistFaviconCache = debounce(() => chrome.storage.local.set({ faviconCache }), 500);
+
+// ─── Hidden-state persist boundary (Phase 6) ──────────────────────────────────
+// Like columns, hidden entries are stored as cross-device REFS while in-memory
+// stays live node ids. serializeHidden/hydrateHidden convert at the boundary;
+// wiring into the col:<id> shards happens in the persist/adopt layer.
+
+// A ref shape we'd trust enough to preserve for another device. Anything else
+// (corrupted storage) is dropped rather than stashed forever.
+const isPlausibleRef = ref =>
+  !!ref && typeof ref === 'object' && Array.isArray(ref.path);
+
+const resolveHiddenRef = ref =>
+  isBookmarkRef(ref) ? resolveBookmarkRef(ref) : resolveRef(ref);
+
+// PERSIST: one column's hidden set -> ref array. Foreign refs that don't
+// resolve here ride along unchanged so this device's write never loses them.
+function serializeHidden(colId) {
+  const out = [];
+  for (const id of hiddenIds[colId] || []) {
+    const node = folderById(id) || allBookmarks.find(b => b.id === id);
+    const ref = node ? (node.url ? bookmarkRef(node) : folderRef(node)) : null;
+    if (ref) { out.push(ref); hiddenRefs.set(id, ref); }
+  }
+  out.push(...(unresolvedHidden[colId] || []));
+  return out;
 }
 
-function persistHiddenIds() {
-  const serialized = {};
-  for (const [colId, ids] of Object.entries(hiddenIds)) {
-    serialized[colId] = [...ids];
+// LOAD: ref array -> live ids in hiddenIds[colId]. Unresolvable refs follow
+// hydrateItem's policy: authored on THIS device -> the item was deleted here,
+// drop; foreign -> stash (it may only exist on another synced device).
+function hydrateHidden(colId, refs) {
+  // A shard written before Phase 6 has no `hidden` field at all — leave the
+  // legacy-loaded device-local state alone. An empty ARRAY is authoritative
+  // ("nothing hidden"); only a missing field means "no information".
+  if (refs == null) return;
+  const set = new Set();
+  const stash = [];
+  for (const ref of refs || []) {
+    const id = resolveHiddenRef(ref);
+    if (id) { set.add(id); hiddenRefs.set(id, ref); }
+    else if (isPlausibleRef(ref) && ref.device !== deviceId) stash.push(ref);
   }
-  chrome.storage.local.set({ hiddenIds: serialized });
+  if (set.size) hiddenIds[colId] = set; else delete hiddenIds[colId];
+  if (stash.length) unresolvedHidden[colId] = stash; else delete unresolvedHidden[colId];
 }
 
 // FLIP animation via CSS transitions: snapshot visual rects, mutate the DOM, then
@@ -713,7 +833,7 @@ function toggleHidden(id, colId) {
   if (!hiddenIds[colId]) hiddenIds[colId] = new Set();
   if (hiddenIds[colId].has(id)) hiddenIds[colId].delete(id);
   else hiddenIds[colId].add(id);
-  persistHiddenIds();
+  persist(); // hidden state rides the layout bundle (col shards) since Phase 6
   refresh();
 }
 
@@ -945,7 +1065,11 @@ async function refresh() {
   await loadRecent();
   rehydrateColumns(); // drop deleted folders; re-resolve markers that reappeared
   pruneHiddenIds();
-  renderColumns();
+  // Never rebuild the DOM under an open rename field — the input (and the
+  // user's typing) would be destroyed. This matters most for Add Folder, whose
+  // own onCreated event lands here debounced while the new folder's name field
+  // is open. The commit/cancel paths detach the input and re-render.
+  if (!document.querySelector('.bookmark-rename-input')) renderColumns();
   // Capture renames/moves into stored refs (no-op if unchanged). Coalesced:
   // bookmark events can arrive in bursts and fire on every synced device at
   // once, so debounce the write to stay well under storage.sync's rate limits
@@ -956,8 +1080,14 @@ async function refresh() {
 // Debounced layout write for high-frequency, event-driven persists (refresh()).
 const persistSoon = debounce(() => persist(), 1000);
 
-// Drop hidden-ID entries that refer to deleted bookmarks/folders or removed
-// columns so storage doesn't accumulate stale data over time.
+// Reconcile hidden state with the current tree + columns (Phase 6 rework).
+// - Entries for removed columns go (set AND stash).
+// - A live id that vanished from the tree is re-resolved via its remembered ref
+//   first (sync id churn gives nodes new ids without deleting them — #9); only
+//   a ref that no longer resolves here means the item is really gone from this
+//   device, and THAT is a deletion worth dropping.
+// - Stashed foreign refs are retried — the item may have arrived via bookmark
+//   sync since the last check.
 function pruneHiddenIds() {
   const validIds = new Set();
   allFolders.forEach(f => validIds.add(f.id));
@@ -965,6 +1095,22 @@ function pruneHiddenIds() {
   const validColIds = new Set(state.columns.map(c => c.id));
 
   let changed = false;
+  for (const colId of Object.keys(unresolvedHidden)) {
+    if (!validColIds.has(colId)) { delete unresolvedHidden[colId]; changed = true; continue; }
+    const still = [];
+    for (const ref of unresolvedHidden[colId]) {
+      const id = resolveHiddenRef(ref);
+      if (id) {
+        (hiddenIds[colId] ??= new Set()).add(id);
+        hiddenRefs.set(id, ref);
+        changed = true;
+      } else {
+        still.push(ref);
+      }
+    }
+    if (still.length) unresolvedHidden[colId] = still;
+    else delete unresolvedHidden[colId];
+  }
   for (const colId of Object.keys(hiddenIds)) {
     if (!validColIds.has(colId)) {
       delete hiddenIds[colId];
@@ -972,12 +1118,19 @@ function pruneHiddenIds() {
       continue;
     }
     const ids = hiddenIds[colId];
-    for (const id of ids) {
-      if (!validIds.has(id)) { ids.delete(id); changed = true; }
+    for (const id of [...ids]) {
+      if (validIds.has(id)) continue;
+      const ref = hiddenRefs.get(id);
+      const newId = ref ? resolveHiddenRef(ref) : null;
+      ids.delete(id);
+      changed = true;
+      if (newId) { ids.add(newId); hiddenRefs.set(newId, ref); }
     }
     if (ids.size === 0) { delete hiddenIds[colId]; changed = true; }
   }
-  if (changed) persistHiddenIds();
+  // Debounced: prune runs inside refresh()/adopt paths; the adopt paths set the
+  // persisted baseline right after, which turns this into a no-op there.
+  if (changed) persistSoon();
 }
 
 // Placeholder for a synced layout slot whose folder isn't resolvable on this
@@ -1197,6 +1350,20 @@ function openAddMenu(trigger, col) {
     renderColumns(); // also closes the menu (renderColumns → closeAddMenu)
   };
 
+  // "Add Folder": create a real (empty) folder under Other bookmarks, show it
+  // at the bottom of this column immediately, and open its name for typing.
+  async function createFolder(container) {
+    const node = await chrome.bookmarks.create({ parentId: container.id, title: 'Untitled' });
+    // Refresh the flat lists ourselves — the onCreated-debounced refresh is
+    // 300ms out, and add() below needs the node resolvable right now.
+    const tree = await chrome.bookmarks.getTree();
+    allFolders = collectFolders(tree[0]);
+    allBookmarks = collectBookmarks(tree[0]);
+    add(node.id);
+    const label = document.querySelector(`.folder-group[data-fid="${CSS.escape(node.id)}"] .folder-label`);
+    if (label) startFolderRename(node, label);
+  }
+
   // Top-level containers (Bookmarks bar, Other bookmarks, …) appear as their own
   // collapsed rows — a chevron to drill into, or a plain row if empty/leaf. No
   // hoisting, so the menu's shape is predictable and a container is never shown
@@ -1251,8 +1418,15 @@ function openAddMenu(trigger, col) {
           page.append(btn);
         });
       }
-      if (rootFolders.length) {
+      const other = otherBookmarks(childrenOf.get('0') || []);
+      if (rootFolders.length || other) {
         page.append(elText('div', 'add-group-label', 'Folders'));
+        if (other) {
+          const btn = el('button', 'add-item add-item-strong');
+          btn.append(elText('span', 'add-item-name', 'Create Folder'));
+          btn.addEventListener('click', e => { e.stopPropagation(); createFolder(other); });
+          page.append(btn, el('div', 'add-sep'));
+        }
         if (rootImplied) {
           const btn = el('button', 'add-item add-item-strong');
           btn.disabled = assigned.has(rootImplied.id);
@@ -1262,7 +1436,7 @@ function openAddMenu(trigger, col) {
         }
         rootFolders.forEach(f => page.append(folderRow(f)));
       }
-      if (!widgets.length && !rootFolders.length) {
+      if (!widgets.length && !rootFolders.length && !other) {
         page.append(elText('div', 'add-group-label', 'Nothing left to add'));
       }
     } else {
@@ -2065,6 +2239,7 @@ function startRename(bm, linkEl) {
     teardown();
     const newTitle = input.value.trim() || original;
     if (newTitle !== original) await undoableUpdate(bm.id, { title: newTitle }, 'rename');
+    input.replaceWith(titleEl); // detach BEFORE refresh — it skips renders while a rename input exists
     refresh();
   }
 
@@ -2113,6 +2288,7 @@ function startFolderRename(folder, nameEl) {
     restoreDrag();
     const newTitle = input.value.trim() || original;
     if (newTitle !== original) await undoableUpdate(folder.id, { title: newTitle }, 'rename');
+    input.replaceWith(nameEl); // detach BEFORE refresh — it skips renders while a rename input exists
     refresh();
   }
 
@@ -2501,6 +2677,13 @@ async function enableSync() {
     // The cloud has (or schema-gates) a layout → ADOPT it; never overwrite it.
     // This is the expected "load my layout from my account". If shards are still
     // mid-replication, the onChanged listener finishes adopting them as they land.
+    // Adopting overwrites this device's layout — snapshot it first, so a later
+    // disable+reset restores what the user had instead of factory defaults.
+    const settings = {};
+    SETTINGS_KEYS.forEach(k => { settings[k] = state[k]; });
+    await chrome.storage.local.set({
+      preSyncBackup: { ts: Date.now(), settings, columns: serializeColumns() },
+    }).catch(() => {});
     await reloadFromActiveStore();
   } else {
     // Cloud is confirmed empty even after the grace re-read → seed it with THIS
@@ -2517,10 +2700,21 @@ async function disableSync(reset) {
   layoutSyncEnabled = false; // active store is now local again
   await chrome.storage.local.set({ [SYNC_ENABLED_KEY]: false });
   if (reset) {
-    // Reset this device's columns to the first-install default. Only this device
-    // is affected — the cloud copy is left intact, so synced devices keep theirs.
-    const tree = await chrome.bookmarks.getTree();
-    state.columns = defaultColumns(tree[0]);
+    // "Reset" restores the layout this device had before sync adopted the cloud
+    // (the preSyncBackup taken on enable); only with no backup does it fall back
+    // to the first-install default. Either way only this device is affected —
+    // the cloud copy is left intact, so synced devices keep theirs.
+    const { preSyncBackup } = await chrome.storage.local.get('preSyncBackup');
+    if (preSyncBackup?.columns) {
+      Object.assign(state, preSyncBackup.settings || {});
+      applySettings();
+      syncSettingsControls();
+      state.columns = hydrateColumns(preSyncBackup.columns);
+      chrome.storage.local.remove('preSyncBackup'); // one restore per sync episode
+    } else {
+      const tree = await chrome.bookmarks.getTree();
+      state.columns = defaultColumns(tree[0]);
+    }
     pruneHiddenIds();
     renderColumns();
   }
@@ -2549,6 +2743,14 @@ async function reloadFromActiveStore() {
 let _systemThemeMq = window.matchMedia('(prefers-color-scheme: dark)');
 let _systemThemeListener = null;
 
+// Set the live theme AND mirror the resolved value to localStorage, where
+// theme-boot.js reads it synchronously pre-paint (chrome.storage is async-only,
+// which is what caused the old wrong-theme flash on every new tab).
+function setDocTheme(resolved) {
+  document.documentElement.setAttribute('data-theme', resolved);
+  try { localStorage.setItem('themeBoot', resolved); } catch { /* storage full/blocked — flash-guard only */ }
+}
+
 function applyTheme(theme) {
   // Remove any previous system listener
   if (_systemThemeListener) {
@@ -2558,13 +2760,13 @@ function applyTheme(theme) {
 
   if (theme === 'system') {
     const apply = () => {
-      document.documentElement.setAttribute('data-theme', _systemThemeMq.matches ? 'dark' : 'light');
+      setDocTheme(_systemThemeMq.matches ? 'dark' : 'light');
     };
     apply();
     _systemThemeListener = apply;
     _systemThemeMq.addEventListener('change', _systemThemeListener);
   } else {
-    document.documentElement.setAttribute('data-theme', theme);
+    setDocTheme(theme);
   }
 }
 
@@ -2597,17 +2799,44 @@ function applySettings() {
 // 8 KB/item limit: settings keys + `colOrder` (column id list) + one `col:<id>`
 // per column. Used for both stores (harmless in local). readLayout also reads
 // the legacy single-`columns` key so pre-3 layouts migrate to shards on load.
-const LAYOUT_SCHEMA = 3; // bump when the stored layout shape changes incompatibly
+// 4 (Phase 6): col:<id> shards gained `hidden: [ref…]`. An older client rebuilds
+// shards without it, silently wiping hidden state — the tooNew freeze prevents that.
+const LAYOUT_SCHEMA = 4; // bump when the stored layout shape changes incompatibly
+
+// §10.2: before the first write that upgrades a store's schema, snapshot the raw
+// pre-migration layout to device-local storage for recovery. Fires once per
+// upgrade — after that write the store reads as the current schema.
+async function backupPreMigrationLayout(store, prevSchema) {
+  const raw = await store.get(null).catch(() => null);
+  if (!raw) return;
+  const keep = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (k === 'colOrder' || k === 'columns' || k === 'layoutSchema' || k === 'hiddenIds'
+        || k.startsWith('col:') || SETTINGS_KEYS.includes(k)) keep[k] = v;
+  }
+  await chrome.storage.local.set({
+    syncLayoutBackup: {
+      schema: prevSchema,
+      ts: Date.now(),
+      store: store === chrome.storage.sync ? 'sync' : 'local',
+      raw: keep,
+    },
+  }).catch(() => {});
+}
 
 async function writeLayout(store, serialized = serializeColumns()) {
   const payload = { layoutSchema: LAYOUT_SCHEMA, colOrder: serialized.map(c => c.id) };
   SETTINGS_KEYS.forEach(k => { payload[k] = state[k]; });
-  serialized.forEach(c => { payload[`col:${c.id}`] = { width: c.width, folderIds: c.folderIds }; });
+  serialized.forEach(c => { payload[`col:${c.id}`] = { width: c.width, folderIds: c.folderIds, hidden: c.hidden }; });
   // Read THIS store's existing column ids — and whether the legacy single-key
   // blob is still present — before overwriting, so we remove only its own
   // orphaned shards. (A single shared `lastColIds` would target the wrong store
   // after a sync on/off switch, orphaning shards — see review #2.)
-  const prev = await store.get(['colOrder', 'columns']).catch(() => ({}));
+  const prev = await store.get(['colOrder', 'columns', 'layoutSchema']).catch(() => ({}));
+  const prevSchema = typeof prev.layoutSchema === 'number' ? prev.layoutSchema : 0;
+  if ((Array.isArray(prev.colOrder) || Array.isArray(prev.columns)) && prevSchema < LAYOUT_SCHEMA) {
+    await backupPreMigrationLayout(store, prevSchema);
+  }
   const prevIds = Array.isArray(prev.colOrder) ? prev.colOrder : [];
   await store.set(payload);
   // Drop shards for removed columns, plus the legacy single-key blob the first
@@ -2632,7 +2861,7 @@ async function readLayout(store) {
     hadColOrder = true;
     const cd = head.colOrder.length ? await store.get(head.colOrder.map(id => `col:${id}`)) : {};
     rawColumns = head.colOrder
-      .map(id => { const c = cd[`col:${id}`]; return c ? { id, width: c.width, folderIds: c.folderIds } : null; })
+      .map(id => { const c = cd[`col:${id}`]; return c ? { id, width: c.width, folderIds: c.folderIds, hidden: c.hidden } : null; })
       .filter(Boolean);
     // Some col:<id> shards listed in colOrder didn't come back — on sync this
     // means replication is still in flight (keys propagate independently). The
@@ -2642,7 +2871,11 @@ async function readLayout(store) {
     rawColumns = head.columns;
     legacy = true;
   }
-  return { settings, rawColumns, legacy, hadColOrder, missingShards, tooNew };
+  // Phase 6: an intact older-schema layout (readable, not tooNew) that should
+  // be eagerly re-persisted in the current schema at boot.
+  const schemaOutdated = hadColOrder && !tooNew &&
+    (typeof head.layoutSchema !== 'number' || head.layoutSchema < LAYOUT_SCHEMA);
+  return { settings, rawColumns, legacy, hadColOrder, missingShards, tooNew, schemaOutdated };
 }
 
 // Format-independent signature of the persisted layout (settings + columns).

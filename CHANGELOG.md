@@ -3,6 +3,20 @@
 All notable changes to this project are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.4.1] — 2026-07-22
+
+### Added
+- **Create Folder from the column editor.** In edit mode, the "+ Add item" menu's Folders list now starts with **Create Folder**: it makes a new, empty bookmark folder (stored under Other Bookmarks), shows it immediately at the bottom of the column, and opens its name for typing — just type and press Enter.
+
+### Fixed
+- **Hidden bookmarks and folders now sync.** With sync on, hiding or showing an item carries across your synced devices like the rest of the layout — including items deep inside folders. Existing hidden state migrates automatically, and an item hidden on one device that another device doesn't have stays remembered instead of being lost by the other device's edits. (Other devices running an older version pause syncing until Chrome auto-updates them to 1.4.1.)
+- **New tabs no longer flash the wrong theme.** The chosen theme is now applied before the page first paints instead of a moment after.
+- **Turning sync off with "Reset" now brings back the layout this device had before sync was enabled**, instead of the first-install default. (The default is still used when there's nothing to restore.)
+- **A bookmark change arriving mid-rename no longer wipes what you've typed.** The page now waits for you to finish (or cancel) a rename before redrawing.
+
+### Changed
+- Favicons load lazily and favicon-cache saves are batched, cutting first-load work noticeably for large bookmark collections.
+
 ## [1.4.0] — 2026-06-27
 
 ### Added

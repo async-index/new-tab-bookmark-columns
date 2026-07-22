@@ -2,7 +2,7 @@
 
 A Chrome extension that replaces the new tab page with a clean, customizable bookmark viewer organized in resizable columns.
 
-**Version 1.4.0** — undo your last bookmark edit with ⌘Z (Ctrl+Z elsewhere); opt-in cross-device sync of your column layout and display settings via your Google account (`chrome.storage.sync`).
+**Version 1.4.1** — hidden bookmarks and folders now sync across devices; create a new folder straight from the column editor; the theme applies before first paint; turning sync off can restore your pre-sync layout.
 
 ![New Tab Bookmark Columns](github-screenshot.png)
 
@@ -45,7 +45,7 @@ The extension overrides Chrome's new tab page via `chrome_url_overrides`.
 ## Permissions
 
 - `bookmarks` — read and write your Chrome bookmark tree
-- `storage` — persist theme, column layout, favicon cache, folder open/closed state, hidden IDs. When you opt into sync, the layout and display settings are stored in `chrome.storage.sync` (synced through your own Google account) instead of locally; the favicon cache and per-device flags always stay local. No new permission is needed for sync.
+- `storage` — persist theme, column layout, favicon cache, folder open/closed state, hidden items. When you opt into sync, the layout, hidden items, and display settings are stored in `chrome.storage.sync` (synced through your own Google account) instead of locally; the favicon cache, folder open/closed state, and per-device flags always stay local. No new permission is needed for sync.
 - `favicon` — fetch site favicons via Chrome's internal `_favicon/` URL
 
 No remote requests are made beyond the per-domain `apple-touch-icon.png` probe used by the favicon fallback chain. Nothing is sent to a third-party server we operate; opt-in sync travels only through Chrome's own sync infrastructure tied to your Google account.
@@ -58,7 +58,7 @@ No remote requests are made beyond the per-domain `apple-touch-icon.png` probe u
 - Vanilla JS — no frameworks, no build step
 - CSS custom properties for the full design token system (color, typography, spacing)
 - `chrome.bookmarks` for tree reads and `move`/`update`/`remove`/`create` (the last backs undo)
-- `chrome.storage.local` for device-local state (favicon cache, sync opt-in flag, folder open/closed, hidden IDs); `chrome.storage.sync` for the layout + display settings when sync is enabled, with a `storage.onChanged` listener for live cross-device updates
+- `chrome.storage.local` for device-local state (favicon cache, sync opt-in flag, folder open/closed); `chrome.storage.sync` for the layout + hidden items + display settings when sync is enabled, with a `storage.onChanged` listener for live cross-device updates
 - HTML5 Drag and Drop API + FLIP animations for column / folder / bookmark reorder
 - `data-theme` attribute on `<html>` for light/dark switching; system theme uses `window.matchMedia` with a live listener
 
@@ -72,6 +72,7 @@ new-tab/
   newtab.html      — Single-page shell, settings panel markup
   newtab.js        — All logic: boot, rendering, drag/drop, context menus, persistence
   newtab.css       — Design tokens, layout, component styles
+  theme-boot.js    — Pre-paint theme application (avoids the new-tab theme flash)
   icons/           — Extension icons (16, 32, 48, 128 px PNGs)
   CHANGELOG.md     — Versioned changelog
   README.md        — This file
